@@ -2045,6 +2045,12 @@ export const zhCN: Dict = {
   'qf.cardSelected': '已选',
   'qf.cardRefs': '参考：',
   'qf.cardSampleText': '飞燕环宇 · 0123',
+  'questions.tabLabel': '问题',
+  'questions.banner': '想先跟你确认几个小问题～',
+  'questions.continue': '继续',
+  'questions.generating': '正在生成问题…',
+  'questions.skipAll': '一键跳过',
+  'questions.autoSkipHint': '倒计时结束后将自动继续',
 
   'sketch.toolSelect': '选择（占位）',
   'sketch.toolPen': '钢笔',

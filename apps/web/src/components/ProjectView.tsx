@@ -13,6 +13,13 @@ import { createHtmlArtifactManifest, inferLegacyManifest } from '../artifacts/ma
 import { resolveHtmlPointerArtifactTarget } from '../artifacts/pointer';
 import { validateHtmlArtifact } from '../artifacts/validate';
 import { createArtifactParser } from '../artifacts/parser';
+import {
+  findFirstQuestionForm,
+  hasUnterminatedQuestionForm,
+  parsePartialQuestionForm,
+  type QuestionForm,
+} from '../artifacts/question-form';
+import { parseSubmittedAnswers } from './QuestionForm';
 import { useI18n } from '../i18n';
 import { streamMessage } from '../providers/anthropic';
 import {
@@ -743,6 +750,78 @@ export function ProjectView({
     || failedMessagesConversationId === activeConversationId
     || currentConversationAwaitingActiveRunAttach;
   const currentConversationActionDisabled = currentConversationBusy || currentConversationSendDisabled;
+
+  // The discovery question form lives in the right-hand Questions tab. We
+  // derive it from the latest assistant message: if that message embeds a
+  // <question-form> block, the panel renders it. The form is interactive
+  // only while it's the most recent turn and the user hasn't answered yet
+  // (an answer arrives as a following "[form answers …]" user message).
+  const lastAssistantIndex = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'assistant') return i;
+    }
+    return -1;
+  }, [messages]);
+  const lastAssistantContent =
+    lastAssistantIndex >= 0 ? messages[lastAssistantIndex]?.content ?? '' : '';
+  const questionForm: QuestionForm | null = useMemo(
+    () => findFirstQuestionForm(lastAssistantContent)?.form ?? null,
+    [lastAssistantContent],
+  );
+  const questionFormSubmittedAnswers = useMemo(() => {
+    if (!questionForm) return undefined;
+    for (let i = lastAssistantIndex + 1; i < messages.length; i++) {
+      const m = messages[i];
+      if (m?.role !== 'user') continue;
+      const parsed = parseSubmittedAnswers(questionForm, m.content ?? '');
+      if (parsed) return parsed;
+    }
+    return undefined;
+  }, [questionForm, lastAssistantIndex, messages]);
+  const questionsGenerating =
+    currentConversationStreaming && hasUnterminatedQuestionForm(lastAssistantContent);
+  // While the form is still streaming, parse it tolerantly so the Questions tab
+  // can show a frame (title) immediately and fill questions in as they arrive.
+  const questionFormPreview = useMemo(
+    () => (questionsGenerating ? parsePartialQuestionForm(lastAssistantContent) : null),
+    [questionsGenerating, lastAssistantContent],
+  );
+  // The active (latest, unanswered) form stays editable the whole time it's on
+  // screen — while it streams in AND while the turn is still busy — so it never
+  // flickers between the locked (grey) and interactive (accent) styles.
+  // Submission is gated separately by the panel via `submitDisabled`/generating.
+  const questionFormActive =
+    (!!questionForm || questionsGenerating) && questionFormSubmittedAnswers === undefined;
+  const hasQuestions = Boolean(questionForm || questionsGenerating);
+  // Stable identity for the current form occurrence, used to remember that its
+  // one-by-one reveal already played. Keyed on the conversation + template id
+  // (not the message index) so the brief streaming→persisted message swap —
+  // which unmounts and re-focuses the Questions tab — doesn't replay the
+  // animation, while a genuinely new form in another conversation still does.
+  const questionFormKey = useMemo(() => {
+    const f = questionForm ?? questionFormPreview;
+    return activeConversationId && f ? `${activeConversationId}:${f.id}` : null;
+  }, [activeConversationId, questionForm, questionFormPreview]);
+
+  // Auto-switch the workspace to the Questions tab when a new discovery form
+  // first appears, and let the chat banner re-focus it on click. The nonce
+  // bump is what FileWorkspace listens to.
+  const [questionsFocusNonce, setQuestionsFocusNonce] = useState(0);
+  const prevHasQuestionsRef = useRef(false);
+  useEffect(() => {
+    if (hasQuestions && !prevHasQuestionsRef.current) {
+      setQuestionsFocusNonce((n) => n + 1);
+    }
+    prevHasQuestionsRef.current = hasQuestions;
+  }, [hasQuestions]);
+  const focusQuestionsRequest = useMemo(
+    () => (questionsFocusNonce > 0 ? { nonce: questionsFocusNonce } : null),
+    [questionsFocusNonce],
+  );
+  const openQuestionsTab = useCallback(() => {
+    setQuestionsFocusNonce((n) => n + 1);
+  }, []);
+
   const currentConversationQueuedItems = activeConversationId
     ? queuedChatSends
         .filter((item) => item.conversationId === activeConversationId)
@@ -4481,6 +4560,7 @@ export function ProjectView({
                 if (currentConversationActionDisabled) return;
                 void handleSend(text, [], []);
               }}
+              onOpenQuestions={openQuestionsTab}
               onContinueRemainingTasks={handleContinueRemainingTasks}
               onAssistantFeedback={handleAssistantFeedback}
               onNewConversation={handleNewConversation}
@@ -4580,6 +4660,18 @@ export function ProjectView({
           githubConnected={githubConnected}
           commentPortalId={commentInspectorPortalId}
           onCommentModeChange={setCommentInspectorActive}
+          questionForm={questionForm}
+          questionFormPreview={questionFormPreview}
+          questionFormKey={questionFormKey}
+          questionFormInteractive={questionFormActive}
+          questionFormSubmitDisabled={currentConversationActionDisabled}
+          questionFormSubmittedAnswers={questionFormSubmittedAnswers}
+          questionsGenerating={questionsGenerating}
+          focusQuestionsRequest={focusQuestionsRequest}
+          onSubmitQuestionForm={(text) => {
+            if (currentConversationActionDisabled) return;
+            void handleSend(text, [], []);
+          }}
         />
       </div>
       {projectActionsToast ? (
