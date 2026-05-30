@@ -666,3 +666,53 @@ describe('AssistantMessage live AskUserQuestion fallback suppression', () => {
     expect(container.textContent).toContain('UNIQUENORMALPROSEXYZ');
   });
 });
+
+describe('AssistantMessage linked repo changes', () => {
+  it('shows linked repo changes as run output', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({
+          content: '',
+          events: [
+            {
+              kind: 'repo_changes',
+              summary: {
+                generatedAt: 1700000000,
+                linkedDirCount: 1,
+                changedFileCount: 2,
+                newStatusLineCount: 2,
+                preexistingChangeCount: 0,
+                untrackedFileCount: 1,
+                hasChanges: true,
+                linkedDirs: [
+                  {
+                    path: '/repo/app',
+                    status: 'changed',
+                    branch: 'main',
+                    headSha: 'abc1234',
+                    changedFileCount: 2,
+                    newStatusLineCount: 2,
+                    preexistingChangeCount: 0,
+                    untrackedFileCount: 1,
+                    statusLines: [' M src/app.ts', '?? src/new.ts'],
+                    diffStat: 'src/app.ts | 8 +++++---',
+                    error: null,
+                  },
+                ],
+              },
+            } as ChatMessage['events'][number],
+          ],
+          producedFiles: [],
+        })}
+        streaming={false}
+        projectId="proj-1"
+      />,
+    );
+
+    expect(screen.getByTestId('linked-repo-changes')).toBeTruthy();
+    expect(screen.getByText('Linked repo changes')).toBeTruthy();
+    expect(screen.getByText('2 changed files · 1 untracked file')).toBeTruthy();
+    expect(screen.getByText('repo/app')).toBeTruthy();
+    expect(screen.getByText(/src\/app\.ts/)).toBeTruthy();
+  });
+});

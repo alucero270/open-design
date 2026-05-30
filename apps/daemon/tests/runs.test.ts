@@ -140,6 +140,41 @@ describe('chat run service shutdown', () => {
     expect(JSON.stringify(status)).not.toContain('server.js');
   });
 
+  it('stores repo changes on the status body without emitting persistence-owned events', () => {
+    const runs = createRuns();
+    const run = runs.create({ projectId: 'project-1', conversationId: 'conv-a' }) as any;
+    const summary = {
+      generatedAt: 1700000000,
+      linkedDirCount: 1,
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+      untrackedFileCount: 0,
+      hasChanges: true,
+      linkedDirs: [
+        {
+          path: '/repo/app',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          changedFileCount: 1,
+          newStatusLineCount: 1,
+          preexistingChangeCount: 0,
+          untrackedFileCount: 0,
+          statusLines: [' M src/app.ts'],
+          diffStat: 'src/app.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+
+    runs.setRepoChanges(run, summary);
+    runs.finish(run, 'succeeded', 0, null);
+
+    expect(runs.statusBody(run).repoChanges).toEqual(summary);
+    expect(run.events.map((event: { event: string }) => event.event)).toEqual(['end']);
+  });
+
   it('cancels active runs and terminates their child process during daemon shutdown', async () => {
     const runs = createRuns();
     const child = new FakeChildProcess({ closeOn: 'SIGTERM' });

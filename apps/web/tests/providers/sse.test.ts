@@ -1529,6 +1529,56 @@ describe('streamViaDaemon', () => {
       detail: 'tavily · shallow',
     });
   });
+
+  it('forwards linked repo change summaries from daemon SSE', async () => {
+    const handlers = createDaemonHandlers();
+    const summary = {
+      generatedAt: 1700000000,
+      linkedDirCount: 1,
+      changedFileCount: 2,
+      newStatusLineCount: 2,
+      preexistingChangeCount: 0,
+      untrackedFileCount: 1,
+      hasChanges: true,
+      linkedDirs: [
+        {
+          path: '/repo/app',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          changedFileCount: 2,
+          newStatusLineCount: 2,
+          preexistingChangeCount: 0,
+          untrackedFileCount: 1,
+          statusLines: [' M src/app.ts', '?? src/new.ts'],
+          diffStat: 'src/app.ts | 8 +++++---',
+          error: null,
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+      .mockResolvedValueOnce(
+        sseResponse(
+          `event: repo_changes\ndata: ${JSON.stringify(summary)}\n\n` +
+            'event: end\ndata: {"code":0,"status":"succeeded"}\n\n',
+        ),
+      ));
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'edit the linked repo' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    expect(handlers.onAgentEvent).toHaveBeenCalledWith({
+      kind: 'repo_changes',
+      summary,
+    });
+    expect(handlers.onDone).toHaveBeenCalledWith('');
+  });
 });
 
 describe('streamMessageOpenAI', () => {

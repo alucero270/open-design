@@ -75,6 +75,7 @@ export function createChatRunService({
       signal: null,
       error: null,
       errorCode: null,
+      repoChanges: null,
       cancelRequested: false,
       eventsLogPath: runsLogDir ? path.join(runsLogDir, id, 'events.jsonl') : null,
       eventsLogStream: null,
@@ -155,7 +156,13 @@ export function createChatRunService({
     eventsLogPath: run.eventsLogPath ?? null,
     mediaExecution: run.mediaExecution ?? normalizeMediaExecutionPolicyForRun(null),
     toolBundle: summarizeRunToolBundle(run.toolBundle),
+    repoChanges: run.repoChanges ?? null,
   });
+
+  const setRepoChanges = (run, repoChanges) => {
+    run.repoChanges = repoChanges ?? null;
+    run.updatedAt = Date.now();
+  };
 
   const finish = (run, status, code: number | null = null, signal: string | null = null) => {
     if (TERMINAL_RUN_STATUSES.has(run.status)) return;
@@ -342,6 +349,7 @@ export function createChatRunService({
     fail,
     drop,
     statusBody,
+    setRepoChanges,
     isTerminal(status) {
       return TERMINAL_RUN_STATUSES.has(status);
     },

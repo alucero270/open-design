@@ -28,6 +28,10 @@ import {
   type TrackingFeedbackRatingWithNone,
   type TrackingProjectKind,
 } from "@open-design/contracts/analytics";
+import type {
+  LinkedRepoChangeDirectorySummary,
+  LinkedRepoChangeSummary,
+} from "@open-design/contracts";
 import {
   splitOnQuestionForms,
   stripTrailingOpenQuestionForm,
@@ -497,6 +501,7 @@ function AssistantMessageImpl({
     );
   }, [events, liveAuq, liveCodeBlocks]);
   const fileOps = useMemo(() => deriveFileOps(events), [events]);
+  const linkedRepoChanges = useMemo(() => latestLinkedRepoChanges(events), [events]);
   const produced = message.producedFiles ?? [];
   const displayedProduced = useMemo(
     () =>
@@ -671,6 +676,9 @@ function AssistantMessageImpl({
             projectFileNames={projectFileNames}
             onRequestOpenFile={onRequestOpenFile}
           />
+        ) : null}
+        {linkedRepoChanges ? (
+          <LinkedRepoChanges summary={linkedRepoChanges} />
         ) : null}
         {blocks.map((b, i) => {
           if (b.kind === "text")
@@ -1745,6 +1753,104 @@ function ProducedFiles({
       </div>
     </div>
   );
+}
+
+function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
+  const rows = summary.linkedDirs.filter(
+    (dir) => dir.changedFileCount > 0 || dir.status === "error",
+  );
+  if (rows.length === 0) return null;
+
+  const parts = [plural(summary.changedFileCount, "changed file")];
+  if (summary.untrackedFileCount > 0) {
+    parts.push(plural(summary.untrackedFileCount, "untracked file"));
+  }
+  if (summary.preexistingChangeCount > 0) {
+    parts.push(`${summary.preexistingChangeCount} pre-existing`);
+  }
+
+  return (
+    <div className="linked-repo-changes" data-testid="linked-repo-changes">
+      <div className="linked-repo-changes__head">
+        <span className="linked-repo-changes__icon" aria-hidden>
+          <Icon name="github" size={14} />
+        </span>
+        <div className="linked-repo-changes__copy">
+          <div className="linked-repo-changes__title">Linked repo changes</div>
+          <div className="linked-repo-changes__summary">{parts.join(" · ")}</div>
+        </div>
+      </div>
+      <div className="linked-repo-changes__list">
+        {rows.map((dir) => (
+          <LinkedRepoChangeRow key={dir.path} dir={dir} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary }) {
+  const label = displayLinkedRepoPath(dir.path);
+  const meta = [
+    dir.branch ? dir.branch : null,
+    dir.headSha ? dir.headSha : null,
+  ].filter(Boolean);
+  const visibleStatusLines = dir.statusLines.slice(0, 8);
+  return (
+    <div className="linked-repo-change-row">
+      <div className="linked-repo-change-row__top">
+        <code className="linked-repo-change-row__path" title={dir.path}>
+          {label}
+        </code>
+        {meta.length > 0 ? (
+          <span className="linked-repo-change-row__meta">{meta.join(" · ")}</span>
+        ) : null}
+        <span className="linked-repo-change-row__count">
+          {plural(dir.changedFileCount, "file")}
+        </span>
+      </div>
+      {dir.error ? (
+        <div className="linked-repo-change-row__error">{dir.error}</div>
+      ) : dir.diffStat ? (
+        <pre className="linked-repo-change-row__stat">
+          {dir.diffStat}
+          {dir.diffStatTruncated ? "\n…truncated" : ""}
+        </pre>
+      ) : visibleStatusLines.length > 0 ? (
+        <div className="linked-repo-change-row__status-lines">
+          {visibleStatusLines.map((line) => (
+            <code key={line}>{line}</code>
+          ))}
+          {dir.statusTruncated ? <code>…truncated</code> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function latestLinkedRepoChanges(events: AgentEvent[]): LinkedRepoChangeSummary | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event?.kind === "repo_changes") {
+      if (
+        event.summary.hasChanges ||
+        event.summary.linkedDirs.some((dir) => dir.status === "error")
+      ) {
+        return event.summary;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+function displayLinkedRepoPath(value: string): string {
+  const segments = value.replace(/\\/g, "/").split("/").filter(Boolean);
+  return segments.slice(-2).join("/") || value;
+}
+
+function plural(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
 // Pure renderer. State (busyKey, notices) and the action runner live in the

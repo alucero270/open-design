@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 import type { DesktopExportPdfInput, DesktopExportPdfResult } from '@open-design/sidecar-proto';
 import express from 'express';
 import multer from 'multer';
@@ -224,6 +224,10 @@ import { subscribe as subscribeFileEvents } from './project-watchers.js';
 import { renderDesignSystemPreview } from './design-system-preview.js';
 import { renderDesignSystemShowcase } from './design-system-showcase.js';
 import { createChatRunService } from './runs.js';
+import {
+  captureLinkedRepoChangeSummary,
+  captureLinkedRepoSnapshot,
+} from './repo-changes.js';
 import { deriveRunErrorCode, runResultFromStatus } from './run-result.js';
 import { classifyRunFailure } from './run-failure-classification.js';
 import { decideSafeRunRetry } from './run-retry-policy.js';
@@ -11155,6 +11159,9 @@ export async function startServer({
       const v = validateLinkedDirs(projectRecord.metadata.linkedDirs);
       return v.dirs ?? [];
     })();
+    const linkedRepoBaseline = linkedDirs.length > 0
+      ? await captureLinkedRepoSnapshot(linkedDirs)
+      : null;
     const cwdHint = cwd
       ? formatDesignFilesWorkspaceHint(cwd, existingProjectFiles, existingProjectFolders)
       : '';
@@ -13133,6 +13140,27 @@ export async function startServer({
       finishWithRetryDecision('failed', 1, null);
     });
     child.on('close', async (code, signal) => {
+      let linkedRepoChangesCaptured = false;
+      const finishClosedRun = async (status, finalCode, finalSignal) => {
+        if (!linkedRepoChangesCaptured && linkedRepoBaseline) {
+          linkedRepoChangesCaptured = true;
+          try {
+            const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
+            const hasRelevantRepoSignal =
+              summary.hasChanges ||
+              summary.linkedDirs.some((dir) => dir.status === 'error');
+            if (hasRelevantRepoSignal) {
+              design.runs.setRepoChanges(run, summary);
+            }
+          } catch (err) {
+            console.warn(
+              '[repo-changes] failed to capture linked repo summary:',
+              err && err.message ? err.message : err,
+            );
+          }
+        }
+        finishWithRetryDecision(status, finalCode, finalSignal);
+      };
       try {
       clearInactivityWatchdog();
       if (watchdogRetryRestarted) {
@@ -13149,10 +13177,10 @@ export async function startServer({
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
       if (acpSession?.hasFatalError()) {
-        return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
+        return finishClosedRun('failed', code ?? 1, signal ?? null);
       }
       if (agentStreamError) {
-        return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
+        return finishClosedRun('failed', code ?? 1, signal ?? null);
       }
       if (
         code !== 0 &&
@@ -13164,7 +13192,7 @@ export async function startServer({
           );
           if (amrFailure) {
             sendAmrAccountFailure(amrFailure);
-            return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
+            return finishClosedRun('failed', code ?? 1, signal ?? null);
           }
         }
         const authFailure = classifyAgentAuthFailure(
@@ -13177,7 +13205,7 @@ export async function startServer({
             authFailure.message ?? cursorAuthGuidance(),
             { retryable: true },
           ));
-          return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
+          return finishClosedRun('failed', code ?? 1, signal ?? null);
         }
       }
       if (
@@ -13214,7 +13242,7 @@ export async function startServer({
           'Agent completed without producing any output. The model or provider may have returned an empty response — check the agent logs for upstream errors.',
           { retryable: true },
         ));
-        return finishWithRetryDecision('failed', code, signal);
+        return finishClosedRun('failed', code, signal);
       }
       if (
         code === 0 &&
@@ -13228,7 +13256,7 @@ export async function startServer({
           'Plugin authoring ended before generating the required generated-plugin artifacts.',
           { retryable: true },
         ));
-        return finishWithRetryDecision('failed', code, signal);
+        return finishClosedRun('failed', code, signal);
       }
       // Plain-stream auth-failure guard: plain adapters (today
       // antigravity, deepseek's TUI variants) may exit cleanly with
@@ -13256,7 +13284,7 @@ export async function startServer({
             authFailure.message ?? `${def.name} authentication required. Please re-authenticate and retry.`,
             { retryable: true },
           ));
-          return finishWithRetryDecision('failed', 0, signal);
+          return finishClosedRun('failed', 0, signal);
         }
       }
       // Plain-stream empty-output guard: plain agents send raw stdout
@@ -13318,7 +13346,7 @@ export async function startServer({
           msg,
           { retryable: true },
         ));
-        return finishWithRetryDecision('failed', 0, signal);
+        return finishClosedRun('failed', 0, signal);
       }
       // ACP agents that don't shut down on stdin.end() (e.g. Devin for
       // Terminal) are forced to exit via SIGTERM from attachAcpSession after
@@ -13478,7 +13506,7 @@ export async function startServer({
       if (status === 'succeeded') {
         persistDeliveredAgentSessionState();
       }
-      finishWithRetryDecision(status, code, signal);
+      await finishClosedRun(status, code, signal);
       } finally {
         // Best-effort cleanup of the per-run agy log file on every close
         // path — successful, failed, cancelled, or non-zero exit — so

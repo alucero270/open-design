@@ -1,4 +1,5 @@
 import type { LiveArtifactRefreshStatus } from '../api/live-artifacts.js';
+import type { LinkedRepoChangeSummary } from '../api/chat.js';
 import type { SseErrorPayload } from '../errors.js';
 import type { SseTransportEvent } from './common.js';
 
@@ -100,6 +101,7 @@ export type DaemonAgentPayload =
 export type ChatSseEvent =
   | SseTransportEvent<'start', ChatSseStartPayload>
   | SseTransportEvent<'agent', DaemonAgentPayload>
+  | SseTransportEvent<'repo_changes', LinkedRepoChangeSummary>
   | SseTransportEvent<'stdout', ChatSseChunkPayload>
   | SseTransportEvent<'stderr', ChatSseChunkPayload>
   | SseTransportEvent<'error', SseErrorPayload>

@@ -869,6 +869,7 @@ async function consumeDaemonRun({
   // no `status` field still surfaces an error banner.
   let serverDeclaredSuccess = false;
   let lastEventId: string | null = initialLastEventId ?? null;
+  let sawRepoChanges = false;
   let canceled = false;
   const cancelRun = () => {
     if (canceled) return;
@@ -967,6 +968,12 @@ async function consumeDaemonRun({
             continue;
           }
 
+          if (event.event === 'repo_changes') {
+            sawRepoChanges = true;
+            handlers.onAgentEvent({ kind: 'repo_changes', summary: event.data });
+            continue;
+          }
+
           if (event.event === 'start') {
             const data = event.data as ChatSseStartPayload;
             onRunStatus?.('running');
@@ -1007,6 +1014,10 @@ async function consumeDaemonRun({
         endStatus = status.status;
         exitCode = status.exitCode ?? null;
         exitSignal = status.signal ?? null;
+        if (status.repoChanges && !sawRepoChanges) {
+          sawRepoChanges = true;
+          handlers.onAgentEvent({ kind: 'repo_changes', summary: status.repoChanges });
+        }
         // Fallback REST path: `status.status` is explicitly declared by the
         // daemon's run record (it passed `isChatRunStatus()` above), so an
         // explicit `'succeeded'` here is just as authoritative as the SSE

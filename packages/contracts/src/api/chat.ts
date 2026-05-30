@@ -237,6 +237,36 @@ export interface ChatRunCreateResponse {
   pluginId?: string | null;
 }
 
+export type LinkedRepoChangeStatus = 'changed' | 'clean' | 'not_git' | 'error';
+
+export interface LinkedRepoChangeDirectorySummary {
+  /** Absolute local linked directory path captured by the daemon. */
+  path: string;
+  status: LinkedRepoChangeStatus;
+  branch?: string | null;
+  headSha?: string | null;
+  changedFileCount: number;
+  newStatusLineCount: number;
+  preexistingChangeCount: number;
+  untrackedFileCount: number;
+  statusLines: string[];
+  statusTruncated?: boolean;
+  diffStat?: string | null;
+  diffStatTruncated?: boolean;
+  error?: string | null;
+}
+
+export interface LinkedRepoChangeSummary {
+  generatedAt: number;
+  linkedDirCount: number;
+  changedFileCount: number;
+  newStatusLineCount: number;
+  preexistingChangeCount: number;
+  untrackedFileCount: number;
+  hasChanges: boolean;
+  linkedDirs: LinkedRepoChangeDirectorySummary[];
+}
+
 export interface ChatRunStatusResponse {
   id: string;
   projectId: string | null;
@@ -260,6 +290,8 @@ export interface ChatRunStatusResponse {
   mediaExecution?: MediaExecutionPolicy;
   /** Run-scoped tool bundle summary with secrets and command details redacted. */
   toolBundle?: RunScopedToolBundleSummary;
+  /** Best-effort linked-repo change summary captured when the run ended. */
+  repoChanges?: LinkedRepoChangeSummary | null;
 }
 
 export interface ChatRunListResponse {
@@ -345,6 +377,7 @@ export type PersistedAgentEvent =
       draftPath?: string | null;
     }
   | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs?: number }
+  | { kind: 'repo_changes'; summary: LinkedRepoChangeSummary }
   | { kind: 'raw'; line: string };
 
 export interface ChatMessage {
