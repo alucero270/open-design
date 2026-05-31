@@ -31,6 +31,7 @@ describe('linked repo change summaries', () => {
       branch: 'main',
       headSha: 'abc1234',
       statusLines: [' M src/app.ts', '?? src/new.ts'],
+      statusPathSets: [['src/app.ts'], ['src/new.ts']],
       statusLineCount: 2,
       untrackedFileCount: 1,
       diffStat: 'src/app.ts | 8 +++++---\n 1 file changed, 5 insertions(+), 3 deletions(-)',
@@ -132,6 +133,100 @@ describe('linked repo change summaries', () => {
       preexistingChangeCount: 1,
     });
     expect(summary.linkedDirs[0]).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 0,
+      preexistingChangeCount: 1,
+    });
+  });
+
+  it('treats renames from pre-existing dirty paths as new output when the target path is new', () => {
+    const before: LinkedRepoSnapshot = {
+      generatedAt: 1,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: [' M src/old.ts'],
+          statusLineCount: 1,
+          untrackedFileCount: 0,
+          diffStat: 'src/old.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+    const after: LinkedRepoSnapshot = {
+      generatedAt: 2,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: ['R  src/old.ts -> src/new.ts'],
+          statusLineCount: 1,
+          untrackedFileCount: 0,
+          diffStat: 'src/old.ts => src/new.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+  });
+
+  it('compares against uncapped baseline path identities when visible status lines are truncated', () => {
+    const before: LinkedRepoSnapshot = {
+      generatedAt: 1,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: [' M src/shown.ts'],
+          statusPathSets: [['src/shown.ts'], ['src/hidden.ts']],
+          statusLineCount: 2,
+          untrackedFileCount: 0,
+          statusTruncated: true,
+          diffStat: null,
+          error: null,
+        },
+      ],
+    };
+    const after: LinkedRepoSnapshot = {
+      generatedAt: 2,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: ['M  src/hidden.ts'],
+          statusPathSets: [['src/hidden.ts']],
+          statusLineCount: 1,
+          untrackedFileCount: 0,
+          diffStat: null,
+          error: null,
+        },
+      ],
+    };
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
       changedFileCount: 1,
       newStatusLineCount: 0,
       preexistingChangeCount: 1,

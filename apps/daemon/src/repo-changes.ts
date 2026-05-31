@@ -16,6 +16,8 @@ export interface LinkedRepoSnapshotDir {
   branch: string | null;
   headSha: string | null;
   statusLines: string[];
+  // Full normalized path identities for comparison; statusLines may be capped for display.
+  statusPathSets?: string[][];
   statusLineCount: number;
   untrackedFileCount: number;
   statusTruncated?: boolean;
@@ -77,11 +79,13 @@ export function summarizeLinkedRepoChanges(
   const beforeByPath = new Map(before.linkedDirs.map((dir) => [dir.path, dir]));
   const linkedDirs: LinkedRepoChangeDirectorySummary[] = after.linkedDirs.map((dir) => {
     const baseline = beforeByPath.get(dir.path);
-    const baselinePaths = new Set((baseline?.statusLines ?? []).flatMap(statusLinePaths));
-    const newStatusLineCount = dir.statusLines.filter((line) => {
-      const paths = statusLinePaths(line);
-      return paths.length === 0 || paths.every((path) => !baselinePaths.has(path));
-    }).length;
+    const baselinePaths = new Set(statusPathSetsForDir(baseline).flat());
+    const newStatusLineCount = Math.min(
+      dir.statusLineCount,
+      statusPathSetsForDir(dir).filter((paths) =>
+        statusPathsIntroduceNewPath(paths, baselinePaths),
+      ).length,
+    );
     const preexistingChangeCount = Math.min(
       dir.statusLineCount,
       Math.max(0, dir.statusLineCount - newStatusLineCount),
@@ -139,6 +143,7 @@ async function captureLinkedRepoDir(
     ]);
     const allStatusLines = splitLines(status.stdout);
     const statusLines = allStatusLines.slice(0, maxStatusLines);
+    const statusPathSets = allStatusLines.map(statusLinePaths);
     const rawDiffStat = diffStat.stdout.trim();
     const diffStatTruncated = rawDiffStat.length > maxDiffStatChars;
     const statusValue: LinkedRepoChangeStatus = allStatusLines.length > 0 ? 'changed' : 'clean';
@@ -148,6 +153,7 @@ async function captureLinkedRepoDir(
       branch: branch.stdout.trim() || null,
       headSha: headSha.stdout.trim() || null,
       statusLines,
+      statusPathSets,
       statusLineCount: allStatusLines.length,
       untrackedFileCount: allStatusLines.filter((line) => line.startsWith('??')).length,
       ...(allStatusLines.length > statusLines.length ? { statusTruncated: true } : {}),
@@ -173,6 +179,7 @@ function emptySnapshotDir(
     branch: null,
     headSha: null,
     statusLines: [],
+    statusPathSets: [],
     statusLineCount: 0,
     untrackedFileCount: 0,
     diffStat: null,
@@ -196,6 +203,14 @@ function statusLinePaths(line: string): string[] {
     .split(renameSeparator)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][] {
+  return dir?.statusPathSets ?? (dir?.statusLines ?? []).map(statusLinePaths);
+}
+
+function statusPathsIntroduceNewPath(paths: string[], baselinePaths: Set<string>): boolean {
+  return paths.length === 0 || paths.some((path) => !baselinePaths.has(path));
 }
 
 function errorMessage(err: unknown): string {
