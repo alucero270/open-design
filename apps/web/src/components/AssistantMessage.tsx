@@ -1811,19 +1811,24 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
       </div>
       {dir.error ? (
         <div className="linked-repo-change-row__error">{dir.error}</div>
-      ) : dir.diffStat ? (
-        <pre className="linked-repo-change-row__stat">
-          {dir.diffStat}
-          {dir.diffStatTruncated ? "\n…truncated" : ""}
-        </pre>
-      ) : visibleStatusLines.length > 0 ? (
-        <div className="linked-repo-change-row__status-lines">
-          {visibleStatusLines.map((line) => (
-            <code key={line}>{line}</code>
-          ))}
-          {dir.statusTruncated ? <code>…truncated</code> : null}
-        </div>
-      ) : null}
+      ) : (
+        <>
+          {dir.diffStat ? (
+            <pre className="linked-repo-change-row__stat">
+              {dir.diffStat}
+              {dir.diffStatTruncated ? "\n…truncated" : ""}
+            </pre>
+          ) : null}
+          {visibleStatusLines.length > 0 ? (
+            <div className="linked-repo-change-row__status-lines">
+              {visibleStatusLines.map((line) => (
+                <code key={line}>{line}</code>
+              ))}
+              {dir.statusTruncated ? <code>…truncated</code> : null}
+            </div>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }

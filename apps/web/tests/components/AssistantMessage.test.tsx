@@ -713,6 +713,7 @@ describe('AssistantMessage linked repo changes', () => {
     expect(screen.getByText('Linked repo changes')).toBeTruthy();
     expect(screen.getByText('2 changed files · 1 untracked file')).toBeTruthy();
     expect(screen.getByText('repo/app')).toBeTruthy();
-    expect(screen.getByText(/src\/app\.ts/)).toBeTruthy();
+    expect(screen.getAllByText(/src\/app\.ts/).length).toBeGreaterThan(0);
+    expect(screen.getByText('?? src/new.ts')).toBeTruthy();
   });
 });
