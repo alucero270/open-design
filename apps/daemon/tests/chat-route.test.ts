@@ -1,5 +1,6 @@
-import type http from 'node:http';
+﻿import type http from 'node:http';
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -789,6 +790,114 @@ process.stdin.on('end', () => {
       },
     );
   });
+  it('persists linked repo changes on the assistant message before ending the run', async () => {
+    const projectId = `proj-linked-repo-${randomUUID()}`;
+    const linkedRepo = mkdtempSync(join(tmpdir(), 'od-linked-repo-'));
+    tempDirs.push(linkedRepo);
+    writeFileSync(join(linkedRepo, 'README.md'), '# Linked repo fixture\n');
+    execFileSync('git', ['init'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Open Design Test'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['add', 'README.md'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'initial fixture'], { cwd: linkedRepo, stdio: 'ignore' });
+
+    const createProjectResponse = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: projectId,
+        name: 'Linked repo persistence fixture',
+        skillId: null,
+        designSystemId: null,
+        metadata: { linkedDirs: [linkedRepo] },
+      }),
+    });
+    expect(createProjectResponse.status).toBe(200);
+    const createProjectBody = await createProjectResponse.json() as {
+      conversationId: string;
+    };
+    const conversationId = createProjectBody.conversationId;
+    expect(conversationId).toBeTruthy();
+    const assistantMessageId = `assistant-${randomUUID()}`;
+
+    await withFakeAgent(
+      'opencode',
+      `
+const fs = require('node:fs');
+const path = require('node:path');
+const linkedRepo = ${JSON.stringify(linkedRepo)};
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync(path.join(linkedRepo, 'src-new.ts'), 'export const fixture = true;\\n');
+  console.log(JSON.stringify({ type: 'step_start' }));
+  console.log(JSON.stringify({ type: 'text', part: { text: 'updated linked repo' } }));
+  console.log(JSON.stringify({ type: 'step_finish', part: { tokens: { input: 1, output: 1 } } }));
+  process.exit(0);
+});
+`,
+      async () => {
+        const createResponse = await fetch(`${baseUrl}/api/runs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: 'opencode',
+            projectId,
+            conversationId,
+            assistantMessageId,
+            message: 'Edit the linked repo.',
+          }),
+        });
+        expect(createResponse.status).toBe(202);
+        const createBody = await createResponse.json() as { runId: string };
+        const eventsResponse = await fetch(`${baseUrl}/api/runs/${createBody.runId}/events`);
+        const eventsBody = await readSseUntil(eventsResponse, 'event: end');
+        const repoChangesIndex = eventsBody.indexOf('event: repo_changes');
+        const endIndex = eventsBody.indexOf('event: end');
+        expect(repoChangesIndex).toBeGreaterThan(-1);
+        expect(endIndex).toBeGreaterThan(repoChangesIndex);
+
+        const statusBody = await waitForRunStatus(baseUrl, createBody.runId) as {
+          status: string;
+          repoChanges?: { hasChanges: boolean; changedFileCount: number };
+        };
+        expect(statusBody.status).toBe('succeeded');
+        expect(statusBody.repoChanges).toMatchObject({
+          hasChanges: true,
+          changedFileCount: 1,
+        });
+
+        const messagesResponse = await fetch(
+          `${baseUrl}/api/projects/${projectId}/conversations/${conversationId}/messages`,
+        );
+        expect(messagesResponse.status).toBe(200);
+        const messagesBody = await messagesResponse.json() as {
+          messages: Array<{ id: string; events?: Array<any> }>;
+        };
+        const assistantMessage = messagesBody.messages.find((message) => message.id === assistantMessageId);
+        expect(assistantMessage).toBeTruthy();
+        expect(assistantMessage?.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: 'repo_changes',
+              summary: expect.objectContaining({
+                hasChanges: true,
+                changedFileCount: 1,
+                linkedDirs: expect.arrayContaining([
+                  expect.objectContaining({
+                    path: expect.any(String),
+                    status: 'changed',
+                    statusLines: expect.arrayContaining(['?? src-new.ts']),
+                  }),
+                ]),
+              }),
+            }),
+          ]),
+        );
+      },
+    );
+  });
+
+
   it('closes the # Instructions block with an explicit "do not echo" guard so models do not parrot the prompt back', async () => {
     // claude-opus-4-7 (and a few other instruction-tuned models) start
     // their reply by echoing the # Instructions block verbatim, which

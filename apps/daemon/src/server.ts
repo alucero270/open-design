@@ -2740,6 +2740,11 @@ function runSseEventToPersistedAgentEvent(event, data) {
       ...(message ? { detail: message } : {}),
     };
   }
+  if (event === 'repo_changes') {
+    return data && typeof data === 'object' && Array.isArray(data.linkedDirs)
+      ? { kind: 'repo_changes', summary: data }
+      : null;
+  }
   if (event !== 'agent') return null;
   return daemonAgentPayloadToPersistedAgentEvent(data);
 }
@@ -13151,6 +13156,7 @@ export async function startServer({
               summary.linkedDirs.some((dir) => dir.status === 'error');
             if (hasRelevantRepoSignal) {
               design.runs.setRepoChanges(run, summary);
+              send('repo_changes', summary);
             }
           } catch (err) {
             console.warn(
