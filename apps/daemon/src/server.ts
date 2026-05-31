@@ -11635,13 +11635,6 @@ export async function startServer({
           'error',
           createSseErrorPayload('AGENT_EXECUTION_FAILED', message),
         );
-        // Route the retried-start failure through the same finalizer as child
-        // close/error so it emits terminal retry telemetry (run_retry_finished
-        // with retry_result: 'failed') and sets run.retryFinalResult, instead
-        // of finishing directly and leaving run_finished to report the fallback
-        // retry_final_result: 'not_attempted'. retryAttemptCount is already 1
-        // here, so decideSafeRunRetry suppresses with attempt_limit_reached and
-        // cannot trigger another restart loop.
         finishWithRetryDecision('failed', 1, null);
       });
     };
@@ -11730,6 +11723,34 @@ export async function startServer({
       finalizeRetryTelemetry(status, decision, failure, errorCode);
       design.runs.finish(run, status, code, signal);
       return false;
+    };
+    let linkedRepoChangesCapturePromise = null;
+    const captureLinkedRepoChangesForRun = async () => {
+      if (!linkedRepoBaseline) return;
+      if (!linkedRepoChangesCapturePromise) {
+        linkedRepoChangesCapturePromise = (async () => {
+          try {
+            const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
+            const hasRelevantRepoSignal =
+              summary.hasChanges ||
+              summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
+            if (hasRelevantRepoSignal) {
+              design.runs.setRepoChanges(run, summary);
+              send('repo_changes', summary);
+            }
+          } catch (err) {
+            console.warn(
+              '[repo-changes] failed to capture linked repo summary:',
+              err && err.message ? err.message : err,
+            );
+          }
+        })();
+      }
+      await linkedRepoChangesCapturePromise;
+    };
+    const finishRunWithLinkedRepoChanges = async (status, finalCode, finalSignal) => {
+      await captureLinkedRepoChangesForRun();
+      finishWithRetryDecision(status, finalCode, finalSignal);
     };
     const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
       enabled: Boolean(toolTokenGrant?.token),
@@ -12213,7 +12234,7 @@ export async function startServer({
         if (child && !child.killed) child.kill('SIGKILL');
       }, inactivityKillGraceMs * 2).unref?.();
     };
-    const failForInactivity = () => {
+    const failForInactivity = async () => {
       if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
       clearInactivityWatchdog();
       if (artifactRegistered) {
@@ -12275,6 +12296,7 @@ export async function startServer({
       // Route through the shared finalizer (after surfacing stallPayload) so
       // the watchdog path gets the same run_retry_attempted/run_retry_finished
       // telemetry as child close/error — not a bare terminal failure.
+      await captureLinkedRepoChangesForRun();
       const retried = finishWithRetryDecision('failed', 1, null);
       if (retried) {
         watchdogRetryRestarted = true;
@@ -13137,34 +13159,17 @@ export async function startServer({
       send('stderr', { chunk });
     });
 
-    child.on('error', (err) => {
+    child.on('error', async (err) => {
       clearInactivityWatchdog();
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
       send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
+      await captureLinkedRepoChangesForRun();
       finishWithRetryDecision('failed', 1, null);
     });
     child.on('close', async (code, signal) => {
-      let linkedRepoChangesCaptured = false;
       const finishClosedRun = async (status, finalCode, finalSignal) => {
-        if (!linkedRepoChangesCaptured && linkedRepoBaseline) {
-          linkedRepoChangesCaptured = true;
-          try {
-            const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
-            const hasRelevantRepoSignal =
-              summary.hasChanges ||
-              summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
-            if (hasRelevantRepoSignal) {
-              design.runs.setRepoChanges(run, summary);
-              send('repo_changes', summary);
-            }
-          } catch (err) {
-            console.warn(
-              '[repo-changes] failed to capture linked repo summary:',
-              err && err.message ? err.message : err,
-            );
-          }
-        }
+        await captureLinkedRepoChangesForRun();
         finishWithRetryDecision(status, finalCode, finalSignal);
       };
       try {

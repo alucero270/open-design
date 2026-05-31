@@ -897,6 +897,122 @@ process.stdin.on('end', () => {
     );
   });
 
+  it('emits linked repo changes before ending stalled runs from the inactivity watchdog', async () => {
+    const previous = process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS;
+    process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = '500';
+    try {
+      const projectId = `proj-linked-repo-stall-${randomUUID()}`;
+      const linkedRepo = mkdtempSync(join(tmpdir(), 'od-linked-repo-stall-'));
+      tempDirs.push(linkedRepo);
+      writeFileSync(join(linkedRepo, 'README.md'), '# Linked repo stall fixture\n');
+      execFileSync('git', ['init'], { cwd: linkedRepo, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: linkedRepo, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.name', 'Open Design Test'], { cwd: linkedRepo, stdio: 'ignore' });
+      execFileSync('git', ['add', 'README.md'], { cwd: linkedRepo, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', 'initial fixture'], { cwd: linkedRepo, stdio: 'ignore' });
+
+      const createProjectResponse = await fetch(`${baseUrl}/api/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: projectId,
+          name: 'Linked repo stall fixture',
+          skillId: null,
+          designSystemId: null,
+          metadata: { linkedDirs: [linkedRepo] },
+        }),
+      });
+      expect(createProjectResponse.status).toBe(200);
+      const createProjectBody = await createProjectResponse.json() as {
+        conversationId: string;
+      };
+      const conversationId = createProjectBody.conversationId;
+      expect(conversationId).toBeTruthy();
+      const assistantMessageId = `assistant-${randomUUID()}`;
+
+      await withFakeAgent(
+        'opencode',
+        `
+const fs = require('node:fs');
+const path = require('node:path');
+const linkedRepo = ${JSON.stringify(linkedRepo)};
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync(path.join(linkedRepo, 'src-stalled.ts'), 'export const stalled = true;\\n');
+  console.log(JSON.stringify({ type: 'step_start' }));
+  process.on('SIGTERM', () => process.exit(143));
+  setInterval(() => {}, 1000);
+});
+`,
+        async () => {
+          const createResponse = await fetch(`${baseUrl}/api/runs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              agentId: 'opencode',
+              projectId,
+              conversationId,
+              assistantMessageId,
+              message: 'Edit the linked repo and then stall.',
+            }),
+          });
+          expect(createResponse.status).toBe(202);
+          const createBody = await createResponse.json() as { runId: string };
+          const eventsResponse = await fetch(`${baseUrl}/api/runs/${createBody.runId}/events`);
+          const eventsBody = await readSseUntil(eventsResponse, 'event: end');
+          const errorIndex = eventsBody.indexOf('event: error');
+          const repoChangesIndex = eventsBody.indexOf('event: repo_changes');
+          const endIndex = eventsBody.indexOf('event: end');
+          expect(errorIndex).toBeGreaterThan(-1);
+          expect(repoChangesIndex).toBeGreaterThan(errorIndex);
+          expect(endIndex).toBeGreaterThan(repoChangesIndex);
+
+          const statusBody = await waitForRunStatus(baseUrl, createBody.runId) as {
+            status: string;
+            repoChanges?: { hasChanges: boolean; changedFileCount: number };
+          };
+          expect(statusBody.status).toBe('failed');
+          expect(statusBody.repoChanges).toMatchObject({
+            hasChanges: true,
+            changedFileCount: 1,
+          });
+
+          const messagesResponse = await fetch(
+            `${baseUrl}/api/projects/${projectId}/conversations/${conversationId}/messages`,
+          );
+          expect(messagesResponse.status).toBe(200);
+          const messagesBody = await messagesResponse.json() as {
+            messages: Array<{ id: string; events?: Array<any> }>;
+          };
+          const assistantMessage = messagesBody.messages.find((message) => message.id === assistantMessageId);
+          expect(assistantMessage).toBeTruthy();
+          expect(assistantMessage?.events).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                kind: 'repo_changes',
+                summary: expect.objectContaining({
+                  hasChanges: true,
+                  linkedDirs: expect.arrayContaining([
+                    expect.objectContaining({
+                      status: 'changed',
+                      statusLines: expect.arrayContaining(['?? src-stalled.ts']),
+                    }),
+                  ]),
+                }),
+              }),
+            ]),
+          );
+        },
+      );
+    } finally {
+      if (previous == null) {
+        delete process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS;
+      } else {
+        process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = previous;
+      }
+    }
+  });
+
   it('persists non-git linked dirs as visible repo change failures', async () => {
     const projectId = `proj-linked-non-git-${randomUUID()}`;
     const linkedDir = mkdtempSync(join(tmpdir(), 'od-linked-non-git-'));
