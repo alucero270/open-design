@@ -1756,17 +1756,39 @@ function ProducedFiles({
 }
 
 function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
+  const t = useT();
   const rows = summary.linkedDirs.filter(
     (dir) => dir.changedFileCount > 0 || dir.status === "error" || dir.status === "not_git",
   );
   if (rows.length === 0) return null;
 
-  const parts = [plural(summary.changedFileCount, "changed file")];
+  const parts = [
+    translateCount(
+      t,
+      summary.changedFileCount,
+      "assistant.linkedRepoChangedFileSingular",
+      "assistant.linkedRepoChangedFilePlural",
+    ),
+  ];
   if (summary.untrackedFileCount > 0) {
-    parts.push(plural(summary.untrackedFileCount, "untracked file"));
+    parts.push(
+      translateCount(
+        t,
+        summary.untrackedFileCount,
+        "assistant.linkedRepoUntrackedFileSingular",
+        "assistant.linkedRepoUntrackedFilePlural",
+      ),
+    );
   }
   if (summary.preexistingChangeCount > 0) {
-    parts.push(`${summary.preexistingChangeCount} pre-existing`);
+    parts.push(
+      translateCount(
+        t,
+        summary.preexistingChangeCount,
+        "assistant.linkedRepoPreexistingChangeSingular",
+        "assistant.linkedRepoPreexistingChangePlural",
+      ),
+    );
   }
 
   return (
@@ -1776,8 +1798,10 @@ function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
           <Icon name="github" size={14} />
         </span>
         <div className="linked-repo-changes__copy">
-          <div className="linked-repo-changes__title">Linked repo changes</div>
-          <div className="linked-repo-changes__summary">{parts.join(" · ")}</div>
+          <div className="linked-repo-changes__title">{t("assistant.linkedRepoChangesTitle")}</div>
+          <div className="linked-repo-changes__summary">
+            {parts.join(t("assistant.linkedRepoSummarySeparator"))}
+          </div>
         </div>
       </div>
       <div className="linked-repo-changes__list">
@@ -1790,6 +1814,7 @@ function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
 }
 
 function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary }) {
+  const t = useT();
   const label = displayLinkedRepoPath(dir.path);
   const meta = [
     dir.branch ? dir.branch : null,
@@ -1806,7 +1831,12 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
           <span className="linked-repo-change-row__meta">{meta.join(" · ")}</span>
         ) : null}
         <span className="linked-repo-change-row__count">
-          {plural(dir.changedFileCount, "file")}
+          {translateCount(
+            t,
+            dir.changedFileCount,
+            "assistant.linkedRepoFileSingular",
+            "assistant.linkedRepoFilePlural",
+          )}
         </span>
       </div>
       {dir.error ? (
@@ -1816,7 +1846,7 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
           {dir.diffStat ? (
             <pre className="linked-repo-change-row__stat">
               {dir.diffStat}
-              {dir.diffStatTruncated ? "\n…truncated" : ""}
+              {dir.diffStatTruncated ? `\n${t("assistant.linkedRepoTruncated")}` : ""}
             </pre>
           ) : null}
           {visibleStatusLines.length > 0 ? (
@@ -1824,7 +1854,7 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
               {visibleStatusLines.map((line) => (
                 <code key={line}>{line}</code>
               ))}
-              {dir.statusTruncated ? <code>…truncated</code> : null}
+              {dir.statusTruncated ? <code>{t("assistant.linkedRepoTruncated")}</code> : null}
             </div>
           ) : null}
         </>
@@ -1854,8 +1884,13 @@ function displayLinkedRepoPath(value: string): string {
   return segments.slice(-2).join("/") || value;
 }
 
-function plural(count: number, singular: string): string {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
+function translateCount(
+  t: TranslateFn,
+  count: number,
+  singularKey: keyof Dict,
+  pluralKey: keyof Dict,
+): string {
+  return t(count === 1 ? singularKey : pluralKey, { count });
 }
 
 // Pure renderer. State (busyKey, notices) and the action runner live in the

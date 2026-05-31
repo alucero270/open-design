@@ -11,6 +11,7 @@ import { useState } from 'react';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AssistantMessage } from '../../src/components/AssistantMessage';
+import { I18nProvider } from '../../src/i18n';
 import type { ChatMessage, ProjectFile } from '../../src/types';
 
 beforeAll(() => {
@@ -761,5 +762,62 @@ describe('AssistantMessage linked repo changes', () => {
     expect(screen.getByTestId('linked-repo-changes')).toBeTruthy();
     expect(screen.getByText('repo/plain-folder')).toBeTruthy();
     expect(screen.getByText('fatal: not a git repository')).toBeTruthy();
+  });
+
+  it('renders linked repo labels through the active locale', () => {
+    render(
+      <I18nProvider initial="id">
+        <AssistantMessage
+          message={baseMessage({
+            content: '',
+            events: [
+              {
+                kind: 'repo_changes',
+                summary: {
+                  generatedAt: 1700000000,
+                  linkedDirCount: 1,
+                  changedFileCount: 2,
+                  newStatusLineCount: 2,
+                  preexistingChangeCount: 0,
+                  untrackedFileCount: 1,
+                  hasChanges: true,
+                  linkedDirs: [
+                    {
+                      path: '/repo/app',
+                      status: 'changed',
+                      branch: 'main',
+                      headSha: 'abc1234',
+                      changedFileCount: 2,
+                      newStatusLineCount: 2,
+                      preexistingChangeCount: 0,
+                      untrackedFileCount: 1,
+                      statusLines: [' M src/app.ts', '?? src/new.ts'],
+                      statusTruncated: true,
+                      diffStat: 'src/app.ts | 8 +++++---',
+                      diffStatTruncated: true,
+                      error: null,
+                    },
+                  ],
+                },
+              } as ChatMessage['events'][number],
+            ],
+            producedFiles: [],
+          })}
+          streaming={false}
+          projectId="proj-1"
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByText('Perubahan repo tertaut')).toBeTruthy();
+    expect(screen.getByText(`2 file berubah ${'\u00b7'} 1 file belum dilacak`)).toBeTruthy();
+    expect(screen.queryByText('Linked repo changes')).toBeNull();
+    expect(screen.getByText('…dipotong')).toBeTruthy();
+    expect(
+      screen.getByText((_, element) =>
+        element?.classList.contains('linked-repo-change-row__stat') === true &&
+        element.textContent?.includes('…dipotong') === true,
+      ),
+    ).toBeTruthy();
   });
 });

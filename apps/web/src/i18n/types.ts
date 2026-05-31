@@ -2903,6 +2903,17 @@ export interface Dict {
   'nextStep.chipBrand': string;
   'nextStep.chipConcise': string;
   'nextStep.chipSecondVersion': string;
+  'assistant.linkedRepoChangesTitle': string;
+  'assistant.linkedRepoChangedFileSingular': string;
+  'assistant.linkedRepoChangedFilePlural': string;
+  'assistant.linkedRepoUntrackedFileSingular': string;
+  'assistant.linkedRepoUntrackedFilePlural': string;
+  'assistant.linkedRepoPreexistingChangeSingular': string;
+  'assistant.linkedRepoPreexistingChangePlural': string;
+  'assistant.linkedRepoFileSingular': string;
+  'assistant.linkedRepoFilePlural': string;
+  'assistant.linkedRepoSummarySeparator': string;
+  'assistant.linkedRepoTruncated': string;
   'assistant.thinking': string;
   'assistant.thought': string;
   'assistant.thoughtFor': string;
