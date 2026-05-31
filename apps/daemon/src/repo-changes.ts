@@ -77,8 +77,11 @@ export function summarizeLinkedRepoChanges(
   const beforeByPath = new Map(before.linkedDirs.map((dir) => [dir.path, dir]));
   const linkedDirs: LinkedRepoChangeDirectorySummary[] = after.linkedDirs.map((dir) => {
     const baseline = beforeByPath.get(dir.path);
-    const baselineLines = new Set(baseline?.statusLines ?? []);
-    const newStatusLineCount = dir.statusLines.filter((line) => !baselineLines.has(line)).length;
+    const baselinePaths = new Set((baseline?.statusLines ?? []).flatMap(statusLinePaths));
+    const newStatusLineCount = dir.statusLines.filter((line) => {
+      const paths = statusLinePaths(line);
+      return paths.length === 0 || paths.every((path) => !baselinePaths.has(path));
+    }).length;
     const preexistingChangeCount = Math.min(
       dir.statusLineCount,
       Math.max(0, dir.statusLineCount - newStatusLineCount),
@@ -182,6 +185,17 @@ function splitLines(value: string): string[] {
     .split(/\r?\n/g)
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
+}
+
+function statusLinePaths(line: string): string[] {
+  const value = line.length > 3 ? line.slice(3).trim() : line.trim();
+  if (!value) return [];
+  const renameSeparator = ' -> ';
+  if (!value.includes(renameSeparator)) return [value];
+  return value
+    .split(renameSeparator)
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 function errorMessage(err: unknown): string {

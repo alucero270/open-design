@@ -90,6 +90,54 @@ describe('linked repo change summaries', () => {
     });
   });
 
+  it('treats status-only transitions on the same path as pre-existing changes', () => {
+    const before: LinkedRepoSnapshot = {
+      generatedAt: 1,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: [' M src/app.ts'],
+          statusLineCount: 1,
+          untrackedFileCount: 0,
+          diffStat: 'src/app.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+    const after: LinkedRepoSnapshot = {
+      generatedAt: 2,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: ['M  src/app.ts'],
+          statusLineCount: 1,
+          untrackedFileCount: 0,
+          diffStat: 'src/app.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 0,
+      preexistingChangeCount: 1,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 0,
+      preexistingChangeCount: 1,
+    });
+  });
+
   it('reports a linked dir as not_git when git cannot read it as a repository', async () => {
     const runGit: RunGit = async () => {
       throw new Error('fatal: not a git repository');
