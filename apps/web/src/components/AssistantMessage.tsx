@@ -1757,7 +1757,7 @@ function ProducedFiles({
 
 function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
   const rows = summary.linkedDirs.filter(
-    (dir) => dir.changedFileCount > 0 || dir.status === "error",
+    (dir) => dir.changedFileCount > 0 || dir.status === "error" || dir.status === "not_git",
   );
   if (rows.length === 0) return null;
 
@@ -1839,7 +1839,7 @@ function latestLinkedRepoChanges(events: AgentEvent[]): LinkedRepoChangeSummary 
     if (event?.kind === "repo_changes") {
       if (
         event.summary.hasChanges ||
-        event.summary.linkedDirs.some((dir) => dir.status === "error")
+        event.summary.linkedDirs.some((dir) => dir.status === "error" || dir.status === "not_git")
       ) {
         return event.summary;
       }

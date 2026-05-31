@@ -897,6 +897,111 @@ process.stdin.on('end', () => {
     );
   });
 
+  it('persists non-git linked dirs as visible repo change failures', async () => {
+    const projectId = `proj-linked-non-git-${randomUUID()}`;
+    const linkedDir = mkdtempSync(join(tmpdir(), 'od-linked-non-git-'));
+    tempDirs.push(linkedDir);
+
+    const createProjectResponse = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: projectId,
+        name: 'Linked non-git persistence fixture',
+        skillId: null,
+        designSystemId: null,
+        metadata: { linkedDirs: [linkedDir] },
+      }),
+    });
+    expect(createProjectResponse.status).toBe(200);
+    const createProjectBody = await createProjectResponse.json() as {
+      conversationId: string;
+    };
+    const conversationId = createProjectBody.conversationId;
+    expect(conversationId).toBeTruthy();
+    const assistantMessageId = `assistant-${randomUUID()}`;
+
+    await withFakeAgent(
+      'opencode',
+      `
+process.stdin.resume();
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({ type: 'step_start' }));
+  console.log(JSON.stringify({ type: 'text', part: { text: 'checked linked folder' } }));
+  console.log(JSON.stringify({ type: 'step_finish', part: { tokens: { input: 1, output: 1 } } }));
+  process.exit(0);
+});
+`,
+      async () => {
+        const createResponse = await fetch(`${baseUrl}/api/runs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: 'opencode',
+            projectId,
+            conversationId,
+            assistantMessageId,
+            message: 'Check the linked folder.',
+          }),
+        });
+        expect(createResponse.status).toBe(202);
+        const createBody = await createResponse.json() as { runId: string };
+        const eventsResponse = await fetch(`${baseUrl}/api/runs/${createBody.runId}/events`);
+        const eventsBody = await readSseUntil(eventsResponse, 'event: end');
+        const repoChangesIndex = eventsBody.indexOf('event: repo_changes');
+        const endIndex = eventsBody.indexOf('event: end');
+        expect(repoChangesIndex).toBeGreaterThan(-1);
+        expect(endIndex).toBeGreaterThan(repoChangesIndex);
+
+        const statusBody = await waitForRunStatus(baseUrl, createBody.runId) as {
+          status: string;
+          repoChanges?: {
+            hasChanges: boolean;
+            linkedDirs: Array<{ path: string; status: string; error: string | null }>;
+          };
+        };
+        expect(statusBody.status).toBe('succeeded');
+        expect(statusBody.repoChanges).toMatchObject({
+          hasChanges: false,
+          linkedDirs: [
+            expect.objectContaining({
+              path: expect.any(String),
+              status: 'not_git',
+              error: expect.stringContaining('not a git repository'),
+            }),
+          ],
+        });
+
+        const messagesResponse = await fetch(
+          `${baseUrl}/api/projects/${projectId}/conversations/${conversationId}/messages`,
+        );
+        expect(messagesResponse.status).toBe(200);
+        const messagesBody = await messagesResponse.json() as {
+          messages: Array<{ id: string; events?: Array<any> }>;
+        };
+        const assistantMessage = messagesBody.messages.find((message) => message.id === assistantMessageId);
+        expect(assistantMessage).toBeTruthy();
+        expect(assistantMessage?.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              kind: 'repo_changes',
+              summary: expect.objectContaining({
+                hasChanges: false,
+                linkedDirs: expect.arrayContaining([
+                  expect.objectContaining({
+                    path: expect.any(String),
+                    status: 'not_git',
+                    error: expect.stringContaining('not a git repository'),
+                  }),
+                ]),
+              }),
+            }),
+          ]),
+        );
+      },
+    );
+  });
+
 
   it('closes the # Instructions block with an explicit "do not echo" guard so models do not parrot the prompt back', async () => {
     // claude-opus-4-7 (and a few other instruction-tuned models) start

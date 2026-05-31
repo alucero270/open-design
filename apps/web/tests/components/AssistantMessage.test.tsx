@@ -716,4 +716,50 @@ describe('AssistantMessage linked repo changes', () => {
     expect(screen.getAllByText(/src\/app\.ts/).length).toBeGreaterThan(0);
     expect(screen.getByText('?? src/new.ts')).toBeTruthy();
   });
+
+  it('shows non-git linked dirs as visible error rows', () => {
+    render(
+      <AssistantMessage
+        message={baseMessage({
+          content: '',
+          events: [
+            {
+              kind: 'repo_changes',
+              summary: {
+                generatedAt: 1700000000,
+                linkedDirCount: 1,
+                changedFileCount: 0,
+                newStatusLineCount: 0,
+                preexistingChangeCount: 0,
+                untrackedFileCount: 0,
+                hasChanges: false,
+                linkedDirs: [
+                  {
+                    path: '/repo/plain-folder',
+                    status: 'not_git',
+                    branch: null,
+                    headSha: null,
+                    changedFileCount: 0,
+                    newStatusLineCount: 0,
+                    preexistingChangeCount: 0,
+                    untrackedFileCount: 0,
+                    statusLines: [],
+                    diffStat: null,
+                    error: 'fatal: not a git repository',
+                  },
+                ],
+              },
+            } as ChatMessage['events'][number],
+          ],
+          producedFiles: [],
+        })}
+        streaming={false}
+        projectId="proj-1"
+      />,
+    );
+
+    expect(screen.getByTestId('linked-repo-changes')).toBeTruthy();
+    expect(screen.getByText('repo/plain-folder')).toBeTruthy();
+    expect(screen.getByText('fatal: not a git repository')).toBeTruthy();
+  });
 });

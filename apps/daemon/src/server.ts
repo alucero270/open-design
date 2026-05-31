@@ -13153,7 +13153,7 @@ export async function startServer({
             const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
             const hasRelevantRepoSignal =
               summary.hasChanges ||
-              summary.linkedDirs.some((dir) => dir.status === 'error');
+              summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
             if (hasRelevantRepoSignal) {
               design.runs.setRepoChanges(run, summary);
               send('repo_changes', summary);
