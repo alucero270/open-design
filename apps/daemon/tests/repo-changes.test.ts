@@ -247,4 +247,19 @@ describe('linked repo change summaries', () => {
       error: 'fatal: not a git repository',
     });
   });
+
+  it('reports a linked dir as error when the git repository probe fails for execution reasons', async () => {
+    const runGit: RunGit = async () => {
+      throw new Error('spawn git ENOENT');
+    };
+
+    const snapshot = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    expect(snapshot.linkedDirs[0]).toMatchObject({
+      path: '/repo',
+      status: 'error',
+      statusLineCount: 0,
+      error: 'spawn git ENOENT',
+    });
+  });
 });

@@ -131,7 +131,7 @@ async function captureLinkedRepoDir(
   try {
     await runGit(dir, ['rev-parse', '--show-toplevel']);
   } catch (err) {
-    return emptySnapshotDir(dir, 'not_git', errorMessage(err));
+    return emptySnapshotDir(dir, statusForRepoProbeError(err), errorMessage(err));
   }
 
   try {
@@ -211,6 +211,10 @@ function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][
 
 function statusPathsIntroduceNewPath(paths: string[], baselinePaths: Set<string>): boolean {
   return paths.length === 0 || paths.some((path) => !baselinePaths.has(path));
+}
+
+function statusForRepoProbeError(err: unknown): LinkedRepoChangeStatus {
+  return /not a git repository/i.test(errorMessage(err)) ? 'not_git' : 'error';
 }
 
 function errorMessage(err: unknown): string {
