@@ -27,10 +27,12 @@
 //     contract above).
 //   * `kind: 'tool_use'` and `kind: 'tool_result'` flush any pending text /
 //     thinking accumulator and emit verbatim.
+//   * `kind: 'repo_changes'` flushes any pending text / thinking accumulator
+//     and emits the linked-repo summary as a first-class block.
 //   * `kind: 'status'` with `label === 'thinking'` is the daemon's translated
 //     thinking_start marker; it flushes the prior accumulator so adjacent
 //     thinking segments preserve their original block boundaries. Other
-//     `status` labels and `kind: 'usage' | 'raw'` drop (telemetry).
+//     telemetry/UI-only events drop.
 //   * Type-change between text ↔ thinking flushes the prior accumulator.
 //
 // Content fallback: user-typed messages persist as plain text in
@@ -56,26 +58,12 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import type { LinkedRepoChangeSummary, PersistedAgentEvent } from '@open-design/contracts';
 import { projectDir } from './projects.js';
 
 const SCHEMA_VERSION = 2;
 const TRANSCRIPT_FILENAME = '.transcript.jsonl';
 const LOCK_FILENAME = '.transcript.lock';
-
-// Inline copy of the PersistedAgentEvent discriminated union from
-// `packages/contracts/src/api/chat.ts`. The daemon tsconfig does not resolve
-// the `./api/chat` subpath export, so the union is restated here. Kept
-// structurally identical to the contract; if the contract diverges, this
-// file will fail behaviorally first (events drop into the default branch)
-// and the schema-mismatch tests will catch it.
-type PersistedAgentEvent =
-  | { kind: 'status'; label: string; detail?: string }
-  | { kind: 'text'; text: string }
-  | { kind: 'thinking'; text: string }
-  | { kind: 'tool_use'; id: string; name: string; input: unknown }
-  | { kind: 'tool_result'; toolUseId: string; content: string; isError: boolean }
-  | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs?: number }
-  | { kind: 'raw'; line: string };
 
 type Db = Database.Database;
 
@@ -115,7 +103,8 @@ type Block =
   | { type: 'text'; text: string }
   | { type: 'thinking'; thinking: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean };
+  | { type: 'tool_result'; toolUseId: string; content: string; isError: boolean }
+  | { type: 'repo_changes'; summary: LinkedRepoChangeSummary };
 
 export interface TranscriptExportOptions {
   now?: () => Date;
@@ -405,9 +394,11 @@ function parseCommentAttachments(raw: string | null): CommentAttachmentRef[] {
 
 // Walk arrival-order. Maintain a single accumulator for the current run of
 // text or thinking events; flush on type change, on any tool block, on a
-// status thinking-start marker, and at end-of-stream. Pure telemetry events
-// (status with non-thinking label, usage, raw) drop without flushing — they
-// neither contribute content nor signal a content boundary.
+// status thinking-start marker, on repo-change summaries, and at
+// end-of-stream. Pure telemetry/UI-only events (status with non-thinking
+// label, usage, raw, live artifacts, plugin candidates) drop without flushing
+// because they neither contribute transcript content nor signal a content
+// boundary.
 //
 // Both `kind: 'text'` and `kind: 'thinking'` carry their content in a `text`
 // field per PersistedAgentEvent; the output blocks rename thinking's field
@@ -469,6 +460,11 @@ function coalesceBlocks(events: PersistedAgentEvent[]): Block[] {
         });
         break;
       }
+      case 'repo_changes': {
+        flush();
+        blocks.push({ type: 'repo_changes', summary: ev.summary });
+        break;
+      }
       case 'status': {
         // status with label === 'thinking' is the daemon's translated
         // thinking_start marker (apps/web/src/providers/daemon.ts:367-369).
@@ -480,10 +476,18 @@ function coalesceBlocks(events: PersistedAgentEvent[]): Block[] {
         if (ev.label === 'thinking') flush();
         break;
       }
-      // Telemetry: usage, raw — intentional drop, neither contributes
-      // content nor signals a content boundary.
-      default:
+      case 'usage':
+      case 'raw':
+      case 'live_artifact':
+      case 'live_artifact_refresh':
+      case 'plugin_candidate':
+        // Intentional drop: these are telemetry/UI-sidecards, not synthesis
+        // transcript content.
         break;
+      default: {
+        const _exhaustive: never = ev;
+        void _exhaustive;
+      }
     }
   }
 

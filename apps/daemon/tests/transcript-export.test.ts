@@ -20,6 +20,7 @@ import type Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { LinkedRepoChangeSummary, PersistedAgentEvent } from '@open-design/contracts';
 import {
   closeDatabase,
   insertConversation,
@@ -48,14 +49,6 @@ afterEach(() => {
 
 type TranscriptLine = Record<string, unknown>;
 type TranscriptLines = TranscriptLine[];
-type PersistedAgentEvent =
-  | { kind: 'status'; label: string; detail?: string }
-  | { kind: 'text'; text: string }
-  | { kind: 'thinking'; text: string }
-  | { kind: 'tool_use'; id: string; name: string; input: unknown }
-  | { kind: 'tool_result'; toolUseId: string; content: string; isError: boolean }
-  | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs?: number }
-  | { kind: 'raw'; line: string };
 type ChatAttachment = { path: string; name: string; kind: string; size?: number };
 type ChatCommentAttachment = {
   id: string;
@@ -131,6 +124,33 @@ function seedMessage(
     attachments: m.attachments,
     commentAttachments: m.commentAttachments,
   });
+}
+
+function linkedRepoSummary(): LinkedRepoChangeSummary {
+  return {
+    generatedAt: 1_770_000_000_000,
+    linkedDirCount: 1,
+    changedFileCount: 2,
+    newStatusLineCount: 1,
+    preexistingChangeCount: 1,
+    untrackedFileCount: 1,
+    hasChanges: true,
+    linkedDirs: [
+      {
+        path: '/work/design-repo',
+        status: 'changed',
+        branch: 'main',
+        headSha: 'abc1234',
+        changedFileCount: 2,
+        newStatusLineCount: 1,
+        preexistingChangeCount: 1,
+        untrackedFileCount: 1,
+        statusLines: [' M src/App.tsx', '?? src/NewCard.tsx'],
+        diffStat: 'src/App.tsx | 2 +-\n1 file changed, 1 insertion(+), 1 deletion(-)',
+        error: null,
+      },
+    ],
+  };
 }
 
 describe('exportProjectTranscript', () => {
@@ -236,6 +256,28 @@ describe('exportProjectTranscript', () => {
       { type: 'tool_use', id: 'tu_1', name: 'Read', input: { path: '/x' } },
       { type: 'tool_result', toolUseId: 'tu_1', content: 'file contents', isError: false },
       { type: 'text', text: ' Done.' },
+    ]);
+  });
+
+  it('preserves repo_changes events as first-class transcript blocks', () => {
+    const { db, projectsRoot } = setup();
+    const summary = linkedRepoSummary();
+    seedConversation(db, { id: 'c1', createdAt: 100 });
+    seedMessage(db, 'c1', {
+      id: 'm1',
+      role: 'assistant',
+      events: [
+        { kind: 'text', text: 'I updated the linked repo.' },
+        { kind: 'repo_changes', summary },
+        { kind: 'text', text: 'Please review the changed files.' },
+      ],
+    });
+
+    const lines = readLines(exportProjectTranscript(db, projectsRoot, PROJECT_ID, { now: FIXED_NOW }).path);
+    expect(line(lines, 2).blocks).toEqual([
+      { type: 'text', text: 'I updated the linked repo.' },
+      { type: 'repo_changes', summary },
+      { type: 'text', text: 'Please review the changed files.' },
     ]);
   });
 
