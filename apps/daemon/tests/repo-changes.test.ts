@@ -20,8 +20,9 @@ describe('linked repo change summaries', () => {
       if (command === 'diff --stat --') {
         return { stdout: ' src/app.ts | 8 +++++---\n 1 file changed, 5 insertions(+), 3 deletions(-)\n', stderr: '' };
       }
-      if (command === 'hash-object -- src/app.ts') return { stdout: 'app-worktree-hash\n', stderr: '' };
-      if (command === 'hash-object -- src/new.ts') return { stdout: 'new-worktree-hash\n', stderr: '' };
+      if (command === 'hash-object -- src/app.ts src/new.ts') {
+        return { stdout: 'app-worktree-hash\nnew-worktree-hash\n', stderr: '' };
+      }
       throw new Error(`unexpected git command: ${command}`);
     };
 
@@ -191,6 +192,40 @@ describe('linked repo change summaries', () => {
       newStatusLineCount: 1,
       preexistingChangeCount: 0,
     });
+  });
+
+  it('batches worktree fingerprints for large dirty snapshots', async () => {
+    const dirtyPaths = Array.from({ length: 450 }, (_, index) => `src/file-${index}.ts`);
+    const hashObjectCommands: string[][] = [];
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: dirtyPaths.map((path) => ` M ${path}`).join('\n'), stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (args[0] === 'hash-object' && args[1] === '--') {
+        const paths = args.slice(2);
+        hashObjectCommands.push(paths);
+        return {
+          stdout: paths.map((path) => `hash-for-${path}`).join('\n') + '\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const snapshot = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    expect(hashObjectCommands).toHaveLength(3);
+    expect(hashObjectCommands.map((paths) => paths.length)).toEqual([200, 200, 50]);
+    expect(snapshot.linkedDirs[0]?.statusLineCount).toBe(450);
+    expect(snapshot.linkedDirs[0]?.statusFingerprints).toHaveLength(450);
+    expect(snapshot.linkedDirs[0]?.statusFingerprints?.[449]).toBe(
+      'src/file-449.ts\u0000worktree:hash-for-src/file-449.ts',
+    );
   });
 
   it('treats renames from pre-existing dirty paths as new output when the target path is new', () => {

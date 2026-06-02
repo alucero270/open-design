@@ -9,6 +9,7 @@ import type {
 const DEFAULT_GIT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_STATUS_LINES = 120;
 const DEFAULT_MAX_DIFF_STAT_CHARS = 8_000;
+const HASH_OBJECT_BATCH_SIZE = 200;
 
 export interface LinkedRepoSnapshotDir {
   path: string;
@@ -245,22 +246,55 @@ async function statusLineFingerprints(
   runGit: RunGit,
   statusPathSets: string[][],
 ): Promise<string[]> {
-  return Promise.all(
-    statusPathSets.map(async (paths) => {
-      const pathFingerprints = await Promise.all(paths.map((path) => statusPathFingerprint(dir, runGit, path)));
-      return statusLineFingerprintFromPathFingerprints(pathFingerprints);
-    }),
+  const uniquePaths = Array.from(new Set(statusPathSets.flat()));
+  const pathFingerprints = await statusPathFingerprints(dir, runGit, uniquePaths);
+  return statusPathSets.map((paths) =>
+    statusLineFingerprintFromPathFingerprints(paths.map((path) =>
+      pathFingerprints.get(path) ?? statusPathMissingFingerprint(path),
+    )),
   );
+}
+
+async function statusPathFingerprints(
+  dir: string,
+  runGit: RunGit,
+  paths: string[],
+): Promise<Map<string, string>> {
+  const fingerprints = new Map<string, string>();
+  for (let index = 0; index < paths.length; index += HASH_OBJECT_BATCH_SIZE) {
+    const batch = paths.slice(index, index + HASH_OBJECT_BATCH_SIZE);
+    if (batch.length === 0) continue;
+    try {
+      const result = await runGit(dir, ['hash-object', '--', ...batch]);
+      const hashes = splitLines(result.stdout);
+      if (hashes.length !== batch.length) throw new Error('hash-object returned an unexpected path count');
+      batch.forEach((path, offset) => {
+        fingerprints.set(path, statusPathContentFingerprint(path, hashes[offset] ?? ''));
+      });
+    } catch {
+      for (const path of batch) {
+        fingerprints.set(path, await statusPathFingerprint(dir, runGit, path));
+      }
+    }
+  }
+  return fingerprints;
 }
 
 async function statusPathFingerprint(dir: string, runGit: RunGit, path: string): Promise<string> {
   try {
     const result = await runGit(dir, ['hash-object', '--', path]);
-    const hash = result.stdout.trim();
-    return `${path}\0worktree:${hash || 'empty'}`;
+    return statusPathContentFingerprint(path, result.stdout.trim());
   } catch {
-    return `${path}\0worktree:missing`;
+    return statusPathMissingFingerprint(path);
   }
+}
+
+function statusPathContentFingerprint(path: string, hash: string): string {
+  return `${path}\0worktree:${hash || 'empty'}`;
+}
+
+function statusPathMissingFingerprint(path: string): string {
+  return `${path}\0worktree:missing`;
 }
 
 function statusLineFingerprintFromPathFingerprints(paths: string[]): string {
