@@ -18,6 +18,8 @@ export interface LinkedRepoSnapshotDir {
   statusLines: string[];
   // Full normalized path identities for comparison; statusLines may be capped for display.
   statusPathSets?: string[][];
+  // Full per-status-line worktree identities for comparison; statusLines may be capped for display.
+  statusFingerprints?: string[];
   statusLineCount: number;
   untrackedFileCount: number;
   statusTruncated?: boolean;
@@ -80,10 +82,16 @@ export function summarizeLinkedRepoChanges(
   const linkedDirs: LinkedRepoChangeDirectorySummary[] = after.linkedDirs.map((dir) => {
     const baseline = beforeByPath.get(dir.path);
     const baselinePaths = new Set(statusPathSetsForDir(baseline).flat());
+    const baselineFingerprintCounts = statusFingerprintsForDir(baseline).reduce((counts, fingerprint) => {
+      counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
+      return counts;
+    }, new Map<string, number>());
+    const statusPathSets = statusPathSetsForDir(dir);
+    const statusFingerprints = statusFingerprintsForDir(dir);
     const newStatusLineCount = Math.min(
       dir.statusLineCount,
-      statusPathSetsForDir(dir).filter((paths) =>
-        statusPathsIntroduceNewPath(paths, baselinePaths),
+      statusPathSets.filter((paths, index) =>
+        statusPathsIntroduceNewOutput(paths, baselinePaths, baselineFingerprintCounts, statusFingerprints[index]),
       ).length,
     );
     const preexistingChangeCount = Math.min(
@@ -144,6 +152,7 @@ async function captureLinkedRepoDir(
     const allStatusLines = splitLines(status.stdout);
     const statusLines = allStatusLines.slice(0, maxStatusLines);
     const statusPathSets = allStatusLines.map(statusLinePaths);
+    const statusFingerprints = await statusLineFingerprints(dir, runGit, statusPathSets);
     const rawDiffStat = diffStat.stdout.trim();
     const diffStatTruncated = rawDiffStat.length > maxDiffStatChars;
     const statusValue: LinkedRepoChangeStatus = allStatusLines.length > 0 ? 'changed' : 'clean';
@@ -154,6 +163,7 @@ async function captureLinkedRepoDir(
       headSha: headSha.stdout.trim() || null,
       statusLines,
       statusPathSets,
+      statusFingerprints,
       statusLineCount: allStatusLines.length,
       untrackedFileCount: allStatusLines.filter((line) => line.startsWith('??')).length,
       ...(allStatusLines.length > statusLines.length ? { statusTruncated: true } : {}),
@@ -180,6 +190,7 @@ function emptySnapshotDir(
     headSha: null,
     statusLines: [],
     statusPathSets: [],
+    statusFingerprints: [],
     statusLineCount: 0,
     untrackedFileCount: 0,
     diffStat: null,
@@ -209,8 +220,51 @@ function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][
   return dir?.statusPathSets ?? (dir?.statusLines ?? []).map(statusLinePaths);
 }
 
-function statusPathsIntroduceNewPath(paths: string[], baselinePaths: Set<string>): boolean {
-  return paths.length === 0 || paths.some((path) => !baselinePaths.has(path));
+function statusFingerprintsForDir(dir: LinkedRepoSnapshotDir | undefined): string[] {
+  if (!dir) return [];
+  return dir.statusFingerprints ?? statusPathSetsForDir(dir).map(statusLineFingerprintFromPathFingerprints);
+}
+
+function statusPathsIntroduceNewOutput(
+  paths: string[],
+  baselinePaths: Set<string>,
+  baselineFingerprintCounts: Map<string, number>,
+  fingerprint: string | undefined,
+): boolean {
+  if (paths.length === 0 || paths.some((path) => !baselinePaths.has(path))) return true;
+  if (!fingerprint) return false;
+  const count = baselineFingerprintCounts.get(fingerprint) ?? 0;
+  if (count <= 0) return true;
+  if (count === 1) baselineFingerprintCounts.delete(fingerprint);
+  else baselineFingerprintCounts.set(fingerprint, count - 1);
+  return false;
+}
+
+async function statusLineFingerprints(
+  dir: string,
+  runGit: RunGit,
+  statusPathSets: string[][],
+): Promise<string[]> {
+  return Promise.all(
+    statusPathSets.map(async (paths) => {
+      const pathFingerprints = await Promise.all(paths.map((path) => statusPathFingerprint(dir, runGit, path)));
+      return statusLineFingerprintFromPathFingerprints(pathFingerprints);
+    }),
+  );
+}
+
+async function statusPathFingerprint(dir: string, runGit: RunGit, path: string): Promise<string> {
+  try {
+    const result = await runGit(dir, ['hash-object', '--', path]);
+    const hash = result.stdout.trim();
+    return `${path}\0worktree:${hash || 'empty'}`;
+  } catch {
+    return `${path}\0worktree:missing`;
+  }
+}
+
+function statusLineFingerprintFromPathFingerprints(paths: string[]): string {
+  return paths.join('\0');
 }
 
 function statusForRepoProbeError(err: unknown): LinkedRepoChangeStatus {

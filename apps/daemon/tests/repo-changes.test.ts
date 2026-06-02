@@ -20,6 +20,8 @@ describe('linked repo change summaries', () => {
       if (command === 'diff --stat --') {
         return { stdout: ' src/app.ts | 8 +++++---\n 1 file changed, 5 insertions(+), 3 deletions(-)\n', stderr: '' };
       }
+      if (command === 'hash-object -- src/app.ts') return { stdout: 'app-worktree-hash\n', stderr: '' };
+      if (command === 'hash-object -- src/new.ts') return { stdout: 'new-worktree-hash\n', stderr: '' };
       throw new Error(`unexpected git command: ${command}`);
     };
 
@@ -32,6 +34,10 @@ describe('linked repo change summaries', () => {
       headSha: 'abc1234',
       statusLines: [' M src/app.ts', '?? src/new.ts'],
       statusPathSets: [['src/app.ts'], ['src/new.ts']],
+      statusFingerprints: [
+        'src/app.ts\u0000worktree:app-worktree-hash',
+        'src/new.ts\u0000worktree:new-worktree-hash',
+      ],
       statusLineCount: 2,
       untrackedFileCount: 1,
       diffStat: 'src/app.ts | 8 +++++---\n 1 file changed, 5 insertions(+), 3 deletions(-)',
@@ -101,6 +107,7 @@ describe('linked repo change summaries', () => {
           branch: 'main',
           headSha: 'abc1234',
           statusLines: [' M src/app.ts'],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content'],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',
@@ -117,6 +124,7 @@ describe('linked repo change summaries', () => {
           branch: 'main',
           headSha: 'abc1234',
           statusLines: ['M  src/app.ts'],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content'],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',
@@ -136,6 +144,52 @@ describe('linked repo change summaries', () => {
       changedFileCount: 1,
       newStatusLineCount: 0,
       preexistingChangeCount: 1,
+    });
+  });
+
+  it('treats further edits to an already-dirty path as new output', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M src/app.ts\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') {
+        return {
+          stdout: phase === 'before'
+            ? ' src/app.ts | 2 ++\n 1 file changed, 2 insertions(+)\n'
+            : ' src/app.ts | 4 ++++\n 1 file changed, 4 insertions(+)\n',
+          stderr: '',
+        };
+      }
+      if (command === 'hash-object -- src/app.ts') {
+        return {
+          stdout: phase === 'before' ? 'before-worktree-hash\n' : 'after-worktree-hash\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const after = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      statusLines: [' M src/app.ts'],
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
     });
   });
 
