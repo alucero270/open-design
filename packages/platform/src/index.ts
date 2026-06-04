@@ -920,8 +920,22 @@ export function wellKnownUserToolchainBins(
   if (typeof npmPrefixRaw === "string") {
     const npmPrefix = npmPrefixRaw.trim();
     if (npmPrefix.length > 0) {
-      dirs.push(join(npmPrefix, "bin"));
+      // On Unix, npm global binaries land in <prefix>/bin.
+      // On Windows, npm installs them directly into the prefix root — there is
+      // no /bin subdirectory. Check which layout is present so both platforms
+      // resolve correctly.
+      const npmBinDir = join(npmPrefix, "bin");
+      dirs.push(existsSync(npmBinDir) ? npmBinDir : npmPrefix);
     }
+  }
+  // Always probe npm's default Windows install location (%APPDATA%\npm) as a
+  // fallback. NPM_CONFIG_PREFIX / npm_config_prefix are npm-internal env vars
+  // that are often absent in Electron child-process environments, so the block
+  // above silently no-ops for most Windows users. The default prefix is
+  // deterministic and safe to add unconditionally.
+  if (process.platform === "win32") {
+    const appDataNpm = join(home, "AppData", "Roaming", "npm");
+    if (existsSync(appDataNpm)) dirs.push(appDataNpm);
   }
   dirs.push(
     join(home, ".local", "bin"),
