@@ -351,4 +351,68 @@ describe('linked repo change summaries', () => {
       error: 'spawn git ENOENT',
     });
   });
+
+  it('handles quoted paths with spaces in git status output', async () => {
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M "a b.txt"\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (command === 'hash-object -- a b.txt') {
+        return { stdout: 'space-file-hash\n', stderr: '' };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const snapshot = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    expect(snapshot.linkedDirs[0]?.statusPathSets).toEqual([['a b.txt']]);
+    expect(snapshot.linkedDirs[0]?.statusFingerprints).toEqual([
+      'a b.txt\u0000worktree:space-file-hash',
+    ]);
+  });
+
+  it('treats further edits to an already-dirty quoted path as new output', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M "a b.txt"\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') {
+        return {
+          stdout: phase === 'before'
+            ? ' "a b.txt" | 2 ++\n 1 file changed, 2 insertions(+)\n'
+            : ' "a b.txt" | 4 ++++\n 1 file changed, 4 insertions(+)\n',
+          stderr: '',
+        };
+      }
+      if (command === 'hash-object -- a b.txt') {
+        return {
+          stdout: phase === 'before' ? 'before-hash\n' : 'after-hash\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const after = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+  });
 });

@@ -210,11 +210,18 @@ function statusLinePaths(line: string): string[] {
   const value = line.length > 3 ? line.slice(3).trim() : line.trim();
   if (!value) return [];
   const renameSeparator = ' -> ';
-  if (!value.includes(renameSeparator)) return [value];
+  if (!value.includes(renameSeparator)) return [unescapePath(value)];
   return value
     .split(renameSeparator)
-    .map((part) => part.trim())
+    .map((part) => unescapePath(part.trim()))
     .filter(Boolean);
+}
+
+function unescapePath(path: string): string {
+  if (path.length >= 2 && path[0] === '"' && path[path.length - 1] === '"') {
+    return path.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return path;
 }
 
 function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][] {
