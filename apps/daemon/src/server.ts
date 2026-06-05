@@ -11732,7 +11732,7 @@ export async function startServer({
           try {
             const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
             const hasRelevantRepoSignal =
-              summary.hasChanges ||
+              summary.newStatusLineCount > 0 ||
               summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
             if (hasRelevantRepoSignal) {
               design.runs.setRepoChanges(run, summary);
