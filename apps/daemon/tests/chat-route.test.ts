@@ -897,7 +897,7 @@ process.stdin.on('end', () => {
     );
   });
 
-  it('emits linked repo changes before ending stalled runs from the inactivity watchdog', async () => {
+  it('emits linked repo changes before the terminal error when ending stalled runs from the inactivity watchdog', async () => {
     const previous = process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS;
     process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = '500';
     try {
@@ -963,9 +963,11 @@ process.stdin.on('end', () => {
           const errorIndex = eventsBody.indexOf('event: error');
           const repoChangesIndex = eventsBody.indexOf('event: repo_changes');
           const endIndex = eventsBody.indexOf('event: end');
-          expect(errorIndex).toBeGreaterThan(-1);
-          expect(repoChangesIndex).toBeGreaterThan(errorIndex);
-          expect(endIndex).toBeGreaterThan(repoChangesIndex);
+          // repo_changes must precede the terminal error: the web SSE consumer
+          // returns on `error`, so a summary emitted afterwards is lost live.
+          expect(repoChangesIndex).toBeGreaterThan(-1);
+          expect(errorIndex).toBeGreaterThan(repoChangesIndex);
+          expect(endIndex).toBeGreaterThan(errorIndex);
 
           const statusBody = await waitForRunStatus(baseUrl, createBody.runId) as {
             status: string;
@@ -1011,6 +1013,90 @@ process.stdin.on('end', () => {
         process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = previous;
       }
     }
+  });
+
+  it('emits linked repo changes before the terminal error on close-handler failure branches', async () => {
+    // A plugin-authoring run that edits the linked repo and then exits 0
+    // without generating artifacts trips the close-handler's plugin-authoring
+    // guard: it `send('error', ...)` before `finishClosedRun()`. The repo
+    // summary must still precede that terminal error so a live SSE session
+    // sees the "Linked repo changes" card instead of only on reattach.
+    const projectId = `proj-linked-repo-close-${randomUUID()}`;
+    const linkedRepo = mkdtempSync(join(tmpdir(), 'od-linked-repo-close-'));
+    tempDirs.push(linkedRepo);
+    writeFileSync(join(linkedRepo, 'README.md'), '# Linked repo close fixture\n');
+    execFileSync('git', ['init'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Open Design Test'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['add', 'README.md'], { cwd: linkedRepo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'initial fixture'], { cwd: linkedRepo, stdio: 'ignore' });
+
+    const createProjectResponse = await fetch(`${baseUrl}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: projectId,
+        name: 'Linked repo close-path fixture',
+        skillId: null,
+        designSystemId: null,
+        metadata: { linkedDirs: [linkedRepo] },
+      }),
+    });
+    expect(createProjectResponse.status).toBe(200);
+    const createProjectBody = await createProjectResponse.json() as { conversationId: string };
+    const conversationId = createProjectBody.conversationId;
+    expect(conversationId).toBeTruthy();
+    const assistantMessageId = `assistant-${randomUUID()}`;
+
+    await withFakeAgent(
+      'opencode',
+      `
+const fs = require('node:fs');
+const path = require('node:path');
+const linkedRepo = ${JSON.stringify(linkedRepo)};
+process.stdin.resume();
+process.stdin.on('end', () => {
+  fs.writeFileSync(path.join(linkedRepo, 'src-close.ts'), 'export const closed = true;\\n');
+  console.log(JSON.stringify({ type: 'step_start' }));
+  console.log(JSON.stringify({ type: 'text', part: { text: 'done — no plugin artifacts generated.' } }));
+  console.log(JSON.stringify({ type: 'step_finish', part: { tokens: { input: 1, output: 1 } } }));
+  process.exit(0);
+});
+`,
+      async () => {
+        const createResponse = await fetch(`${baseUrl}/api/runs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agentId: 'opencode',
+            projectId,
+            conversationId,
+            assistantMessageId,
+            pluginId: 'od-plugin-authoring',
+            message: 'Edit the linked repo and generate nothing.',
+          }),
+        });
+        expect(createResponse.status).toBe(202);
+        const createBody = await createResponse.json() as { runId: string };
+        const eventsResponse = await fetch(`${baseUrl}/api/runs/${createBody.runId}/events`);
+        const eventsBody = await readSseUntil(eventsResponse, 'event: end');
+        const repoChangesIndex = eventsBody.indexOf('event: repo_changes');
+        const errorIndex = eventsBody.indexOf('event: error');
+        const endIndex = eventsBody.indexOf('event: end');
+        // The close-handler error must come AFTER repo_changes.
+        expect(repoChangesIndex).toBeGreaterThan(-1);
+        expect(errorIndex).toBeGreaterThan(repoChangesIndex);
+        expect(endIndex).toBeGreaterThan(errorIndex);
+        expect(eventsBody).toContain('ended before generating the required generated-plugin artifacts');
+
+        const statusBody = await waitForRunStatus(baseUrl, createBody.runId) as {
+          status: string;
+          repoChanges?: { hasChanges: boolean; changedFileCount: number };
+        };
+        expect(statusBody.status).toBe('failed');
+        expect(statusBody.repoChanges).toMatchObject({ hasChanges: true, changedFileCount: 1 });
+      },
+    );
   });
 
   it('persists non-git linked dirs as visible repo change failures', async () => {

@@ -13194,6 +13194,15 @@ export async function startServer({
       }
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
+      // Capture and emit linked-repo changes ONCE here, before any of the
+      // close-path branches below can `send('error', ...)` /
+      // `sendAmrAccountFailure(...)`. The web SSE consumer returns on the first
+      // `error` (apps/web/src/providers/daemon.ts), so a `repo_changes` event
+      // emitted after a terminal error — as finishClosedRun would do on the
+      // auth, empty-output, plugin-authoring, resume-failure and diagnostic
+      // branches — is lost to a live chat session. The call is idempotent
+      // (memoized), so finishClosedRun's own capture is a harmless no-op.
+      await captureLinkedRepoChangesForRun();
       if (acpSession?.hasFatalError()) {
         return finishClosedRun('failed', code ?? 1, signal ?? null);
       }
