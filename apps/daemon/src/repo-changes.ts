@@ -152,8 +152,9 @@ async function captureLinkedRepoDir(
     ]);
     const allStatusLines = splitLines(status.stdout);
     const statusLines = allStatusLines.slice(0, maxStatusLines);
-    const statusPathSets = allStatusLines.map(statusLinePaths);
-    const statusFingerprints = await statusLineFingerprints(dir, runGit, statusPathSets);
+    const statusPathSets = allStatusLines.map((line) => statusLineInfo(line).paths);
+    const statusBitsPerLine = allStatusLines.map((line) => statusLineInfo(line).statusBits);
+    const statusFingerprints = await statusLineFingerprints(dir, runGit, statusPathSets, statusBitsPerLine);
     const rawDiffStat = diffStat.stdout.trim();
     const diffStatTruncated = rawDiffStat.length > maxDiffStatChars;
     const statusValue: LinkedRepoChangeStatus = allStatusLines.length > 0 ? 'changed' : 'clean';
@@ -206,15 +207,24 @@ function splitLines(value: string): string[] {
     .filter((line) => line.trim().length > 0);
 }
 
-function statusLinePaths(line: string): string[] {
+interface StatusLineInfo {
+  paths: string[];
+  statusBits: string;
+}
+
+function statusLineInfo(line: string): StatusLineInfo {
+  const statusBits = line.length >= 2 ? line.slice(0, 2) : '  ';
   const value = line.length > 3 ? line.slice(3).trim() : line.trim();
-  if (!value) return [];
+  if (!value) return { paths: [], statusBits };
   const renameSeparator = ' -> ';
-  if (!value.includes(renameSeparator)) return [unescapePath(value)];
-  return value
-    .split(renameSeparator)
-    .map((part) => unescapePath(part.trim()))
-    .filter(Boolean);
+  if (!value.includes(renameSeparator)) return { paths: [unescapePath(value)], statusBits };
+  return {
+    paths: value
+      .split(renameSeparator)
+      .map((part) => unescapePath(part.trim()))
+      .filter(Boolean),
+    statusBits,
+  };
 }
 
 function unescapePath(path: string): string {
@@ -225,12 +235,16 @@ function unescapePath(path: string): string {
 }
 
 function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][] {
-  return dir?.statusPathSets ?? (dir?.statusLines ?? []).map(statusLinePaths);
+  return dir?.statusPathSets ?? (dir?.statusLines ?? []).map((line) => statusLineInfo(line).paths);
 }
 
 function statusFingerprintsForDir(dir: LinkedRepoSnapshotDir | undefined): string[] {
   if (!dir) return [];
-  return dir.statusFingerprints ?? statusPathSetsForDir(dir).map(statusLineFingerprintFromPathFingerprints);
+  return dir.statusFingerprints ?? (dir?.statusLines ?? []).map((line) => statusLineFingerprintFromPathFingerprints(statusLineInfo(line).paths, statusLineInfo(line).statusBits));
+}
+
+function statusLineFingerprintFromPathFingerprints(paths: string[], statusBits: string): string {
+  return `${paths.join('\0')}\0status:${statusBits}`;
 }
 
 function statusPathsIntroduceNewOutput(
@@ -252,13 +266,17 @@ async function statusLineFingerprints(
   dir: string,
   runGit: RunGit,
   statusPathSets: string[][],
+  statusBitsPerLine: string[],
 ): Promise<string[]> {
   const uniquePaths = Array.from(new Set(statusPathSets.flat()));
   const pathFingerprints = await statusPathFingerprints(dir, runGit, uniquePaths);
-  return statusPathSets.map((paths) =>
-    statusLineFingerprintFromPathFingerprints(paths.map((path) =>
-      pathFingerprints.get(path) ?? statusPathMissingFingerprint(path),
-    )),
+  return statusPathSets.map((paths, index) =>
+    statusLineFingerprintFromPathFingerprints(
+      paths.map((path) =>
+        pathFingerprints.get(path) ?? statusPathMissingFingerprint(path),
+      ),
+      statusBitsPerLine[index] ?? '  ',
+    ),
   );
 }
 
@@ -302,10 +320,6 @@ function statusPathContentFingerprint(path: string, hash: string): string {
 
 function statusPathMissingFingerprint(path: string): string {
   return `${path}\0worktree:missing`;
-}
-
-function statusLineFingerprintFromPathFingerprints(paths: string[]): string {
-  return paths.join('\0');
 }
 
 function statusForRepoProbeError(err: unknown): LinkedRepoChangeStatus {
