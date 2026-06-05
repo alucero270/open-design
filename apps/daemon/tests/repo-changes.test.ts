@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 
 import {
   captureLinkedRepoSnapshot,
@@ -400,6 +400,87 @@ describe('linked repo change summaries', () => {
         };
       }
       throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const after = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+  });
+
+  it('decodes C-style escaped paths (tab/newline) so the worktree probe hits the real file', async () => {
+    // `core.quotepath=false` still C-quotes control characters, so git emits
+    // the literal two-character sequence `\t` inside double quotes. The real
+    // pathname contains a tab byte, and `git hash-object --` must receive that
+    // real byte — not the `\t` digraph — for the worktree fingerprint to work.
+    const tabPath = 'tab\tfile.txt';
+    const newlinePath = 'multi\nline.txt';
+    const hashObjectPaths: string[] = [];
+    // git hash-object emits one clean SHA per line; key a stable fake off the
+    // path index so control characters never leak into stdout.
+    const fakeHash = (path: string) => `sha-${[tabPath, newlinePath].indexOf(path)}`;
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M "tab\\tfile.txt"\n?? "multi\\nline.txt"\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (args[0] === 'hash-object' && args[1] === '--') {
+        const paths = args.slice(2);
+        hashObjectPaths.push(...paths);
+        return { stdout: paths.map(fakeHash).join('\n') + '\n', stderr: '' };
+      }
+      throw new Error(`unexpected git command: ${JSON.stringify(command)}`);
+    };
+
+    const snapshot = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+
+    // Paths are decoded to their real (control-character-bearing) form.
+    expect(snapshot.linkedDirs[0]?.statusPathSets).toEqual([[tabPath], [newlinePath]]);
+    // hash-object received the real decoded bytes, not the `\t` / `\n` digraphs.
+    expect(hashObjectPaths).toContain(tabPath);
+    expect(hashObjectPaths).toContain(newlinePath);
+    expect(hashObjectPaths.some((path) => path.includes('\\t') || path.includes('\\n'))).toBe(false);
+    // The worktree probe resolved, so no fingerprint fell back to "missing".
+    expect(snapshot.linkedDirs[0]?.statusFingerprints?.[0]).toBe(
+      `${tabPath}\u0000worktree:sha-0\u0000status: M`,
+    );
+    expect(snapshot.linkedDirs[0]?.statusFingerprints?.[0]).not.toContain('worktree:missing');
+  });
+
+  it('counts further edits to an already-dirty escaped path as new output', async () => {
+    // Regression: when the tab path was not decoded, `git hash-object` failed
+    // and both snapshots fell back to `worktree:missing`, so a real content
+    // change on the already-dirty path was misreported as pre-existing.
+    const tabPath = 'tab\tfile.txt';
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M "tab\\tfile.txt"\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      // Only matches when the real tab byte is passed through (proves decoding).
+      if (args[0] === 'hash-object' && args[1] === '--' && args[2] === tabPath) {
+        return {
+          stdout: phase === 'before' ? 'before-hash\n' : 'after-hash\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${JSON.stringify(command)}`);
     };
 
     const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });

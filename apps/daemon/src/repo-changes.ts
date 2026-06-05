@@ -227,11 +227,70 @@ function statusLineInfo(line: string): StatusLineInfo {
   };
 }
 
+// Git C-style escape sequences (see quote.c `quote_c_style`). `core.quotepath`
+// only governs whether *high-bit* bytes are octal-escaped — control characters
+// (tab, newline, …), `"`, and `\` are ALWAYS escaped and the whole path wrapped
+// in double quotes. Decoding only `\"`/`\\` therefore leaves real tab/newline
+// bytes encoded as the literal two characters `\t`/`\n`, which then makes the
+// follow-up `git hash-object -- <path>` probe miss the real file.
+const C_STYLE_ESCAPES: Record<string, number> = {
+  a: 0x07,
+  b: 0x08,
+  t: 0x09,
+  n: 0x0a,
+  v: 0x0b,
+  f: 0x0c,
+  r: 0x0d,
+  '"': 0x22,
+  '\\': 0x5c,
+};
+
 function unescapePath(path: string): string {
-  if (path.length >= 2 && path[0] === '"' && path[path.length - 1] === '"') {
-    return path.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  if (!(path.length >= 2 && path[0] === '"' && path[path.length - 1] === '"')) {
+    return path;
   }
-  return path;
+  const body = path.slice(1, -1);
+  // Octal escapes encode raw bytes, and literal runs may contain multi-byte
+  // UTF-8, so reassemble at the byte level and decode once at the end.
+  const bytes: number[] = [];
+  let literalStart = 0;
+  const flushLiteral = (end: number): void => {
+    if (end > literalStart) {
+      const slice = Buffer.from(body.slice(literalStart, end), 'utf8');
+      for (let i = 0; i < slice.length; i += 1) bytes.push(slice[i]!);
+    }
+  };
+  let cursor = 0;
+  while (cursor < body.length) {
+    if (body[cursor] !== '\\' || cursor + 1 >= body.length) {
+      cursor += 1;
+      continue;
+    }
+    flushLiteral(cursor);
+    const next = body[cursor + 1]!;
+    if (next >= '0' && next <= '7') {
+      // Up to three octal digits → one byte (git always emits exactly three).
+      let digits = '';
+      let scan = cursor + 1;
+      while (scan < body.length && digits.length < 3 && body[scan]! >= '0' && body[scan]! <= '7') {
+        digits += body[scan];
+        scan += 1;
+      }
+      bytes.push(parseInt(digits, 8) & 0xff);
+      cursor = scan;
+    } else if (next in C_STYLE_ESCAPES) {
+      bytes.push(C_STYLE_ESCAPES[next]!);
+      cursor += 2;
+    } else {
+      // Unknown escape — preserve the escaped character literally.
+      const slice = Buffer.from(next, 'utf8');
+      for (let i = 0; i < slice.length; i += 1) bytes.push(slice[i]!);
+      cursor += 2;
+    }
+    literalStart = cursor;
+  }
+  flushLiteral(body.length);
+  return Buffer.from(bytes).toString('utf8');
 }
 
 function statusPathSetsForDir(dir: LinkedRepoSnapshotDir | undefined): string[][] {
