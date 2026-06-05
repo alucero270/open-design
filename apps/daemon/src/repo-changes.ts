@@ -216,15 +216,52 @@ function statusLineInfo(line: string): StatusLineInfo {
   const statusBits = line.length >= 2 ? line.slice(0, 2) : '  ';
   const value = line.length > 3 ? line.slice(3).trim() : line.trim();
   if (!value) return { paths: [], statusBits };
-  const renameSeparator = ' -> ';
-  if (!value.includes(renameSeparator)) return { paths: [unescapePath(value)], statusBits };
+  // Only rename/copy entries (X or Y is R/C) carry the ` -> ` separator.
+  // A plain status line whose path merely *contains* ` -> ` — e.g. a file
+  // literally named `a -> b.txt`, emitted as ` M a -> b.txt` — must stay a
+  // single path. Splitting it would invent two nonexistent paths, fail the
+  // `hash-object` probe, and misclassify a later edit as pre-existing.
+  const isRenameOrCopy =
+    statusBits[0] === 'R' ||
+    statusBits[0] === 'C' ||
+    statusBits[1] === 'R' ||
+    statusBits[1] === 'C';
+  if (!isRenameOrCopy) {
+    return { paths: [unescapePath(value)], statusBits };
+  }
+  const renameParts = splitTopLevelRename(value);
+  if (renameParts.length < 2) {
+    return { paths: [unescapePath(value)], statusBits };
+  }
   return {
-    paths: value
-      .split(renameSeparator)
-      .map((part) => unescapePath(part.trim()))
-      .filter(Boolean),
+    paths: renameParts.map((part) => unescapePath(part)).filter(Boolean),
     statusBits,
   };
+}
+
+// Split a rename/copy payload (`<old> -> <new>`) on the top-level ` -> `
+// separator only — one that sits outside any C-quoted segment — so a quoted
+// pathname containing a literal ` -> ` is not split in the wrong place.
+function splitTopLevelRename(value: string): string[] {
+  let inQuotes = false;
+  let i = 0;
+  while (i < value.length) {
+    const ch = value[i];
+    if (inQuotes && ch === '\\') {
+      i += 2; // skip an escaped character inside a quoted segment
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      i += 1;
+      continue;
+    }
+    if (!inQuotes && value.startsWith(' -> ', i)) {
+      return [value.slice(0, i), value.slice(i + 4)];
+    }
+    i += 1;
+  }
+  return [value];
 }
 
 // Git C-style escape sequences (see quote.c `quote_c_style`). `core.quotepath`

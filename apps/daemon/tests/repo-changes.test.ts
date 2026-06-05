@@ -496,6 +496,74 @@ describe('linked repo change summaries', () => {
     });
   });
 
+  it('does not split a non-rename path that literally contains " -> "', async () => {
+    // git emits ` M a -> b.txt` for a modified file named `a -> b.txt` (no
+    // special chars, so unquoted). The ` -> ` is part of the name, not a
+    // rename separator. If it were split, the probe would target the
+    // nonexistent `a` and `b.txt`, fall back to worktree:missing, and a later
+    // edit would be misclassified as pre-existing instead of new output.
+    const weirdPath = 'a -> b.txt';
+    const hashObjectPaths: string[] = [];
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: ' M a -> b.txt\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (args[0] === 'hash-object' && args[1] === '--') {
+        const paths = args.slice(2);
+        hashObjectPaths.push(...paths);
+        // Real git only resolves the actual on-disk path; the buggy split
+        // paths ('a', 'b.txt') would error and fall back to worktree:missing.
+        if (paths.length === 1 && paths[0] === weirdPath) {
+          return { stdout: (phase === 'before' ? 'h-before' : 'h-after') + '\n', stderr: '' };
+        }
+        throw new Error(`pathspec did not match: ${paths.join(', ')}`);
+      }
+      throw new Error(`unexpected git command: ${JSON.stringify(command)}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    // The ` -> ` stays inside a single path.
+    expect(before.linkedDirs[0]?.statusPathSets).toEqual([[weirdPath]]);
+    expect(hashObjectPaths).toEqual([weirdPath]);
+    expect(before.linkedDirs[0]?.statusFingerprints?.[0]).not.toContain('worktree:missing');
+
+    phase = 'after';
+    const after = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    const summary = summarizeLinkedRepoChanges(before, after);
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+    });
+  });
+
+  it('still splits a real rename entry on the top-level " -> " separator', async () => {
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') return { stdout: 'abc1234\n', stderr: '' };
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: 'R  src/old.ts -> src/new.ts\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (args[0] === 'hash-object' && args[1] === '--') {
+        const paths = args.slice(2);
+        return { stdout: paths.map((p) => `hash-${p}`).join('\n') + '\n', stderr: '' };
+      }
+      throw new Error(`unexpected git command: ${JSON.stringify(command)}`);
+    };
+
+    const snapshot = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    expect(snapshot.linkedDirs[0]?.statusPathSets).toEqual([['src/old.ts', 'src/new.ts']]);
+  });
+
   it('treats index-only staging of already-dirty path as new output', () => {
     const before: LinkedRepoSnapshot = {
       generatedAt: 1,

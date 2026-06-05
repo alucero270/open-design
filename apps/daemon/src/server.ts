@@ -12288,6 +12288,11 @@ export async function startServer({
           'Retry the turn, pick a different model, or start a new conversation if the prior context is very large.';
         stallPayload = createSseErrorPayload('AGENT_EXECUTION_FAILED', message, { retryable: true });
       }
+      // Surface linked-repo changes BEFORE the terminal error: the web SSE
+      // consumer returns on `error` (apps/web/src/providers/daemon.ts), so a
+      // `repo_changes` event emitted afterwards never reaches a live chat
+      // session — it would only show up on a later reload/status reattach.
+      await captureLinkedRepoChangesForRun();
       send('error', stallPayload);
       // A silent first-token hang is one of the safe transient failure shapes
       // this run is allowed to recover: classifyRunFailure maps the stall text
@@ -12296,7 +12301,6 @@ export async function startServer({
       // Route through the shared finalizer (after surfacing stallPayload) so
       // the watchdog path gets the same run_retry_attempted/run_retry_finished
       // telemetry as child close/error — not a bare terminal failure.
-      await captureLinkedRepoChangesForRun();
       const retried = finishWithRetryDecision('failed', 1, null);
       if (retried) {
         watchdogRetryRestarted = true;
@@ -13163,8 +13167,11 @@ export async function startServer({
       clearInactivityWatchdog();
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
-      send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
+      // Emit linked-repo changes before the terminal error (see the watchdog
+      // note): the web consumer returns on `error`, so any `repo_changes`
+      // event sent afterwards is lost to a live session.
       await captureLinkedRepoChangesForRun();
+      send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
       finishWithRetryDecision('failed', 1, null);
     });
     child.on('close', async (code, signal) => {

@@ -1579,6 +1579,68 @@ describe('streamViaDaemon', () => {
     });
     expect(handlers.onDone).toHaveBeenCalledWith('');
   });
+
+  it('surfaces linked repo changes emitted before a terminal error', async () => {
+    // On failure paths (watchdog stall, child spawn error) the daemon emits
+    // `repo_changes` BEFORE the terminal `error`. The consumer returns on
+    // `error`, so this ordering is what lets a live chat session still receive
+    // the linked-repo summary instead of only seeing it on a later reattach.
+    const handlers = createDaemonHandlers();
+    const summary = {
+      generatedAt: 1700000000,
+      linkedDirCount: 1,
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+      untrackedFileCount: 0,
+      hasChanges: true,
+      linkedDirs: [
+        {
+          path: '/repo/app',
+          status: 'changed',
+          branch: 'main',
+          headSha: 'abc1234',
+          changedFileCount: 1,
+          newStatusLineCount: 1,
+          preexistingChangeCount: 0,
+          untrackedFileCount: 0,
+          statusLines: [' M src/app.ts'],
+          diffStat: 'src/app.ts | 2 ++',
+          error: null,
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ runId: 'run-1' }))
+      .mockResolvedValueOnce(
+        sseResponse(
+          `event: repo_changes\ndata: ${JSON.stringify(summary)}\n\n` +
+            'event: error\ndata: {"message":"agent stalled","error":{"code":"AGENT_EXECUTION_FAILED","message":"agent stalled"}}\n\n' +
+            'event: end\ndata: {"code":1,"status":"failed"}\n\n',
+        ),
+      ));
+
+    await streamViaDaemon({
+      agentId: 'mock',
+      history: [{ id: '1', role: 'user', content: 'edit the linked repo' }],
+      systemPrompt: '',
+      signal: new AbortController().signal,
+      handlers,
+    });
+
+    // The pre-error repo_changes still reaches the live session…
+    expect(handlers.onAgentEvent).toHaveBeenCalledWith({
+      kind: 'repo_changes',
+      summary,
+    });
+    // …and the terminal error is still surfaced.
+    expect(handlers.onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'agent stalled',
+        code: 'AGENT_EXECUTION_FAILED',
+      }),
+    );
+  });
 });
 
 describe('streamMessageOpenAI', () => {
