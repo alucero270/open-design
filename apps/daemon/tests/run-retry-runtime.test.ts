@@ -221,6 +221,52 @@ describe('same-run retry runtime', () => {
     expect(events.filter((event) => event.event === 'run_retry_attempted')).toHaveLength(0);
     expect(events.filter((event) => event.event === 'end')).toHaveLength(1);
   });
+
+  it('recaptures linked repo changes after a same-run retry', async () => {
+    binDir = await mkdtemp(path.join(os.tmpdir(), 'od-run-retry-linked-recapture-bin-'));
+    const linkedRepo = path.join(binDir, 'linked-repo');
+    await initLinkedRepo(linkedRepo);
+    const { bin: fakeClaude } = await writeStallingThenEditingClaude(
+      binDir,
+      'claude-stall-then-edit-linked',
+      linkedRepo,
+    );
+
+    delete process.env.POSTHOG_KEY;
+    delete process.env.POSTHOG_HOST;
+    delete process.env.LANGFUSE_PUBLIC_KEY;
+    delete process.env.LANGFUSE_SECRET_KEY;
+    delete process.env.LANGFUSE_BASE_URL;
+    delete process.env.OPEN_DESIGN_TELEMETRY_RELAY_URL;
+    process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = '400';
+
+    started = await startServer({ port: 0, returnServer: true }) as StartedServer;
+    await putConfig(started.url, {
+      agentId: 'claude',
+      agentCliEnv: { claude: { CLAUDE_BIN: fakeClaude } },
+      telemetry: { metrics: true, content: false, artifactManifest: false },
+      privacyDecisionAt: Date.now(),
+    });
+
+    const run = await createAndWaitForRun(started.url, { linkedDirs: [linkedRepo] });
+    expect(run.status).toBe('succeeded');
+    expect(run.repoChanges).toMatchObject({
+      hasChanges: true,
+      newStatusLineCount: 1,
+      linkedDirs: [
+        expect.objectContaining({
+          status: 'changed',
+          statusLines: expect.arrayContaining(['?? retry-success-output.ts']),
+        }),
+      ],
+    });
+
+    const events = await readRunEvents(run.eventsLogPath);
+    expect(events.filter((event) => event.event === 'start')).toHaveLength(2);
+    expect(events.filter((event) => event.event === 'run_retry_attempted')).toHaveLength(1);
+    expect(events.filter((event) => event.event === 'repo_changes')).toHaveLength(1);
+    expect(events.filter((event) => event.event === 'end')).toHaveLength(1);
+  });
 });
 
 function snapshotEnv(): Record<string, string | undefined> {
@@ -322,6 +368,52 @@ if (attempts === 0) {
     message: {
       id: 'msg-retry-stall-success',
       content: [{ type: 'text', text: 'Recovered after watchdog retry.' }],
+      stop_reason: 'end_turn'
+    }
+  }));
+  setTimeout(() => process.exit(0), 20);
+}
+`, 'utf8');
+  await chmod(bin, 0o755);
+  return { bin, argsLogPath };
+}
+
+async function writeStallingThenEditingClaude(
+  dir: string,
+  name: string,
+  linkedRepoPath: string,
+): Promise<{ bin: string; argsLogPath: string }> {
+  const bin = path.join(dir, name);
+  const counterPath = path.join(dir, `${name}-attempts`);
+  const argsLogPath = path.join(dir, `${name}-args.jsonl`);
+  await writeFile(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const counterPath = ${JSON.stringify(counterPath)};
+const argsLogPath = ${JSON.stringify(argsLogPath)};
+const linkedRepoPath = ${JSON.stringify(linkedRepoPath)};
+if (process.argv.includes('--version')) {
+  console.log('claude-code 1.0.0-retry-linked-recapture');
+  process.exit(0);
+}
+if (process.argv.includes('--help')) {
+  console.log('Usage: claude -p [--include-partial-messages] [--add-dir DIR]');
+  process.exit(0);
+}
+let attempts = 0;
+try { attempts = Number(fs.readFileSync(counterPath, 'utf8')) || 0; } catch {}
+fs.writeFileSync(counterPath, String(attempts + 1));
+fs.appendFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)) + '\\n');
+if (attempts === 0) {
+  setTimeout(() => process.exit(0), 60000);
+} else {
+  fs.writeFileSync(path.join(linkedRepoPath, 'retry-success-output.ts'), 'export const retrySuccessOutput = true;\\n');
+  console.log(JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-retry-test' }));
+  console.log(JSON.stringify({
+    type: 'assistant',
+    message: {
+      id: 'msg-retry-linked-recapture-success',
+      content: [{ type: 'text', text: 'Recovered and edited linked repo after retry.' }],
       stop_reason: 'end_turn'
     }
   }));

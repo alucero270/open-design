@@ -11677,6 +11677,12 @@ export async function startServer({
           : {}),
       });
     };
+    let linkedRepoChangesCapturePromise = null;
+    let terminalErrorAfterLinkedRepoChangesPromise = null;
+    const resetLinkedRepoCaptureStateForRetry = () => {
+      linkedRepoChangesCapturePromise = null;
+      terminalErrorAfterLinkedRepoChangesPromise = null;
+    };
     const finishWithRetryDecision = (status, code = null, signal = null) => {
       run.analyticsTelemetry = {
         ...(run.analyticsTelemetry ?? {}),
@@ -11720,6 +11726,7 @@ export async function startServer({
           ...retryAnalyticsBase(decision, failure, errorCode),
           retry_reason: decision.retryReason,
         });
+        resetLinkedRepoCaptureStateForRetry();
         restartSameRunAfterRetry();
         return true;
       }
@@ -11727,7 +11734,6 @@ export async function startServer({
       design.runs.finish(run, status, code, signal);
       return false;
     };
-    let linkedRepoChangesCapturePromise = null;
     const captureLinkedRepoChangesForRun = async () => {
       if (!linkedRepoBaseline) return;
       if (!linkedRepoChangesCapturePromise) {
@@ -11751,7 +11757,6 @@ export async function startServer({
       }
       await linkedRepoChangesCapturePromise;
     };
-    let terminalErrorAfterLinkedRepoChangesPromise = null;
     const sendTerminalErrorAfterLinkedRepoChanges = (payload) => {
       if (!terminalErrorAfterLinkedRepoChangesPromise) {
         terminalErrorAfterLinkedRepoChangesPromise = (async () => {
