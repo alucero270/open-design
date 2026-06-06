@@ -11751,8 +11751,24 @@ export async function startServer({
       }
       await linkedRepoChangesCapturePromise;
     };
+    let terminalErrorAfterLinkedRepoChangesPromise = null;
+    const sendTerminalErrorAfterLinkedRepoChanges = (payload) => {
+      if (!terminalErrorAfterLinkedRepoChangesPromise) {
+        terminalErrorAfterLinkedRepoChangesPromise = (async () => {
+          await captureLinkedRepoChangesForRun();
+          send('error', payload);
+        })();
+      }
+      void terminalErrorAfterLinkedRepoChangesPromise;
+    };
+    const waitForTerminalErrorAfterLinkedRepoChanges = async () => {
+      if (terminalErrorAfterLinkedRepoChangesPromise) {
+        await terminalErrorAfterLinkedRepoChangesPromise;
+      }
+    };
     const finishRunWithLinkedRepoChanges = async (status, finalCode, finalSignal) => {
       await captureLinkedRepoChangesForRun();
+      await waitForTerminalErrorAfterLinkedRepoChanges();
       finishWithRetryDecision(status, finalCode, finalSignal);
     };
     const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
@@ -12893,8 +12909,7 @@ export async function startServer({
     function abortForRoleMarker(marker: string) {
       if (roleMarkerAbortFired) return;
       roleMarkerAbortFired = true;
-      send(
-        'error',
+      sendTerminalErrorAfterLinkedRepoChanges(
         createSseErrorPayload(
           'ROLE_MARKER_HALLUCINATION',
           `Run terminated: model emitted fabricated role marker (\`${marker}\`). ` +
@@ -12934,7 +12949,7 @@ export async function startServer({
         clearInactivityWatchdog();
         const authFailure = classifyAgentAuthFailure(agentId, failureText);
         if (authFailure?.status === 'missing') {
-          send('error', createSseErrorPayload(
+          sendTerminalErrorAfterLinkedRepoChanges(createSseErrorPayload(
             'AGENT_AUTH_REQUIRED',
             authFailure.message ?? cursorAuthGuidance(),
             { retryable: true },
@@ -12947,13 +12962,13 @@ export async function startServer({
         // execution-failed bucket.
         const serviceCode = classifyAgentServiceFailure(failureText);
         if (serviceCode) {
-          send('error', createSseErrorPayload(serviceCode, agentStreamError, {
+          sendTerminalErrorAfterLinkedRepoChanges(createSseErrorPayload(serviceCode, agentStreamError, {
             details: ev.raw ? { raw: ev.raw } : undefined,
             retryable: true,
           }));
           return;
         }
-        send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', agentStreamError, {
+        sendTerminalErrorAfterLinkedRepoChanges(createSseErrorPayload('AGENT_EXECUTION_FAILED', agentStreamError, {
           details: ev.raw ? { raw: ev.raw } : undefined,
           retryable: false,
         }));
@@ -13061,7 +13076,7 @@ export async function startServer({
               clearAgentSession(db, run.conversationId, def.id);
             }
             clearInactivityWatchdog();
-            send('error', createSseErrorPayload(
+            sendTerminalErrorAfterLinkedRepoChanges(createSseErrorPayload(
               'AGENT_EXECUTION_FAILED',
               agentStreamError,
               { retryable: false },
@@ -13104,6 +13119,10 @@ export async function startServer({
           }
           if (event === 'agent' && data?.type === 'text_delta' && typeof data.delta === 'string') {
             emitGuardedTextDelta(data.delta);
+            return;
+          }
+          if (event === 'error') {
+            sendTerminalErrorAfterLinkedRepoChanges(data);
             return;
           }
           send(event, data);
@@ -13180,6 +13199,7 @@ export async function startServer({
     child.on('close', async (code, signal) => {
       const finishClosedRun = async (status, finalCode, finalSignal) => {
         await captureLinkedRepoChangesForRun();
+        await waitForTerminalErrorAfterLinkedRepoChanges();
         finishWithRetryDecision(status, finalCode, finalSignal);
       };
       try {
@@ -13206,6 +13226,7 @@ export async function startServer({
       // branches — is lost to a live chat session. The call is idempotent
       // (memoized), so finishClosedRun's own capture is a harmless no-op.
       await captureLinkedRepoChangesForRun();
+      await waitForTerminalErrorAfterLinkedRepoChanges();
       if (acpSession?.hasFatalError()) {
         return finishClosedRun('failed', code ?? 1, signal ?? null);
       }
