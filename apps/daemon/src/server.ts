@@ -2288,6 +2288,18 @@ export function __forTestScanRunEventsForFinishedProps(events, reqBodyModel) {
   return scanRunEventsForFinishedProps(events, reqBodyModel);
 }
 
+function isRepoChangesRetryBlocking(summary) {
+  if (!summary || typeof summary !== 'object') return false;
+  if (summary.hasChanges === true) return true;
+  if ((summary.refChangeCount ?? 0) > 0) return true;
+  if (Array.isArray(summary.linkedDirs)) {
+    for (const dir of summary.linkedDirs) {
+      if (dir.headChanged === true || dir.branchChanged === true) return true;
+    }
+  }
+  return false;
+}
+
 function scanRunEventsForRetrySideEffects(events) {
   const sideEffects = {
     userVisibleOutputSeen: false,
@@ -2304,7 +2316,11 @@ function scanRunEventsForRetrySideEffects(events) {
     }
     const data = rec?.data;
     if (!data || typeof data !== 'object') continue;
-    if (rec?.event === 'repo_changes' && Array.isArray(data.linkedDirs)) {
+    if (
+      rec?.event === 'repo_changes'
+      && Array.isArray(data.linkedDirs)
+      && isRepoChangesRetryBlocking(data)
+    ) {
       sideEffects.userVisibleOutputSeen = true;
     }
     if (data.type === 'text_delta' || data.type === 'thinking_delta') {

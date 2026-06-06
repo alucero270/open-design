@@ -168,6 +168,44 @@ describe('run retry analytics helpers', () => {
     });
   });
 
+  it('treats repo_changes with hasChanges as retry-blocking', () => {
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: true, linkedDirs: [] } },
+    ])).toMatchObject({ userVisibleOutputSeen: true });
+
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, refChangeCount: 3, linkedDirs: [] } },
+    ])).toMatchObject({ userVisibleOutputSeen: true });
+
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, linkedDirs: [{ path: '/a', headChanged: true }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: true });
+
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, linkedDirs: [{ path: '/b', branchChanged: true }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: true });
+  });
+
+  it('does not treat repo_changes with only probe failures as retry-blocking', () => {
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, linkedDirs: [{ path: '/notgit', status: 'not_git' }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: false });
+
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, linkedDirs: [{ path: '/error', status: 'error', error: 'git probe failed' }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: false });
+
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: false, linkedDirs: [{ path: '/notgit', status: 'not_git' }, { path: '/error', status: 'error' }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: false });
+  });
+
+  it('treats repo_changes with both probe failures and actual changes as retry-blocking', () => {
+    expect(__forTestScanRunEventsForRetrySideEffects([
+      { event: 'repo_changes', data: { hasChanges: true, linkedDirs: [{ path: '/notgit', status: 'not_git' }, { path: '/changed', status: 'changed' }] } },
+    ])).toMatchObject({ userVisibleOutputSeen: true });
+  });
+
   it('derives retry final result from terminal status and attempt count', () => {
     expect(__forTestRetryFinalResultForRunStatus('succeeded', 0)).toBe('not_attempted');
     expect(__forTestRetryFinalResultForRunStatus('failed', 0)).toBe('suppressed');
