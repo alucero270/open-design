@@ -11694,10 +11694,12 @@ export async function startServer({
       });
     };
     let linkedRepoChangesCapturePromise = null;
+    let linkedRepoCaptureAttemptId = 0;
     let terminalErrorAfterLinkedRepoChangesPromise = null;
     const resetLinkedRepoCaptureStateForRetry = () => {
       linkedRepoChangesCapturePromise = null;
       terminalErrorAfterLinkedRepoChangesPromise = null;
+      linkedRepoCaptureAttemptId += 1;
     };
     const finishWithRetryDecision = (status, code = null, signal = null) => {
       run.analyticsTelemetry = {
@@ -11753,13 +11755,14 @@ export async function startServer({
     const captureLinkedRepoChangesForRun = async () => {
       if (!linkedRepoBaseline) return;
       if (!linkedRepoChangesCapturePromise) {
+        const attemptIdAtStart = linkedRepoCaptureAttemptId;
         linkedRepoChangesCapturePromise = (async () => {
           try {
             const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
             const hasRelevantRepoSignal =
               summary.hasChanges ||
               summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
-            if (hasRelevantRepoSignal) {
+            if (hasRelevantRepoSignal && attemptIdAtStart === linkedRepoCaptureAttemptId) {
               design.runs.setRepoChanges(run, summary);
               send('repo_changes', summary);
             }
