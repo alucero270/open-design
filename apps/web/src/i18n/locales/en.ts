@@ -3025,6 +3025,6 @@ export const en: Dict = {
   'assistant.linkedRepoPreexistingChangePlural': '{count} pre-existing changes',
   'assistant.linkedRepoFileSingular': '{count} file',
   'assistant.linkedRepoFilePlural': '{count} files',
-  'assistant.linkedRepoSummarySeparator': ' ┬╖ ',
-  'assistant.linkedRepoTruncated': 'ΓÇªtruncated',
+  'assistant.linkedRepoSummarySeparator': ' · ',
+  'assistant.linkedRepoTruncated': '…truncated',
 };
