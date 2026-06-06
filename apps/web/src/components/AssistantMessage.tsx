@@ -1758,18 +1758,26 @@ function ProducedFiles({
 function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
   const t = useT();
   const rows = summary.linkedDirs.filter(
-    (dir) => dir.changedFileCount > 0 || dir.status === "error" || dir.status === "not_git",
+    (dir) =>
+      dir.changedFileCount > 0 ||
+      dir.branchChanged ||
+      dir.headChanged ||
+      dir.status === "error" ||
+      dir.status === "not_git",
   );
   if (rows.length === 0) return null;
 
-  const parts = [
-    translateCount(
-      t,
-      summary.changedFileCount,
-      "assistant.linkedRepoChangedFileSingular",
-      "assistant.linkedRepoChangedFilePlural",
-    ),
-  ];
+  const parts: string[] = [];
+  if (summary.changedFileCount > 0) {
+    parts.push(
+      translateCount(
+        t,
+        summary.changedFileCount,
+        "assistant.linkedRepoChangedFileSingular",
+        "assistant.linkedRepoChangedFilePlural",
+      ),
+    );
+  }
   if (summary.untrackedFileCount > 0) {
     parts.push(
       translateCount(
@@ -1787,6 +1795,17 @@ function LinkedRepoChanges({ summary }: { summary: LinkedRepoChangeSummary }) {
         summary.preexistingChangeCount,
         "assistant.linkedRepoPreexistingChangeSingular",
         "assistant.linkedRepoPreexistingChangePlural",
+      ),
+    );
+  }
+  const refChangeCount = linkedRepoRefChangeCount(summary);
+  if (refChangeCount > 0) {
+    parts.push(
+      translateCount(
+        t,
+        refChangeCount,
+        "assistant.linkedRepoRefUpdateSingular",
+        "assistant.linkedRepoRefUpdatePlural",
       ),
     );
   }
@@ -1820,6 +1839,20 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
     dir.branch ? dir.branch : null,
     dir.headSha ? dir.headSha : null,
   ].filter(Boolean);
+  const hasRefUpdate = dir.branchChanged || dir.headChanged;
+  const rowCount = dir.changedFileCount > 0 || !hasRefUpdate
+    ? translateCount(
+      t,
+      dir.changedFileCount,
+      "assistant.linkedRepoFileSingular",
+      "assistant.linkedRepoFilePlural",
+    )
+    : translateCount(
+      t,
+      1,
+      "assistant.linkedRepoRefUpdateSingular",
+      "assistant.linkedRepoRefUpdatePlural",
+    );
   const visibleStatusLines = dir.statusLines.slice(0, 8);
   return (
     <div className="linked-repo-change-row">
@@ -1831,12 +1864,7 @@ function LinkedRepoChangeRow({ dir }: { dir: LinkedRepoChangeDirectorySummary })
           <span className="linked-repo-change-row__meta">{meta.join(" · ")}</span>
         ) : null}
         <span className="linked-repo-change-row__count">
-          {translateCount(
-            t,
-            dir.changedFileCount,
-            "assistant.linkedRepoFileSingular",
-            "assistant.linkedRepoFilePlural",
-          )}
+          {rowCount}
         </span>
       </div>
       {dir.error ? (
@@ -1877,6 +1905,11 @@ function latestLinkedRepoChanges(events: AgentEvent[]): LinkedRepoChangeSummary 
     }
   }
   return null;
+}
+
+function linkedRepoRefChangeCount(summary: LinkedRepoChangeSummary): number {
+  if (typeof summary.refChangeCount === "number") return summary.refChangeCount;
+  return summary.linkedDirs.filter((dir) => dir.branchChanged || dir.headChanged).length;
 }
 
 function displayLinkedRepoPath(value: string): string {

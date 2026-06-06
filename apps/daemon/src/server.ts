@@ -2304,6 +2304,9 @@ function scanRunEventsForRetrySideEffects(events) {
     }
     const data = rec?.data;
     if (!data || typeof data !== 'object') continue;
+    if (rec?.event === 'repo_changes' && Array.isArray(data.linkedDirs)) {
+      sideEffects.userVisibleOutputSeen = true;
+    }
     if (data.type === 'text_delta' || data.type === 'thinking_delta') {
       const delta = typeof data.delta === 'string' ? data.delta : '';
       if (delta.length > 0) sideEffects.userVisibleOutputSeen = true;
@@ -11732,7 +11735,7 @@ export async function startServer({
           try {
             const summary = await captureLinkedRepoChangeSummary(linkedRepoBaseline);
             const hasRelevantRepoSignal =
-              summary.newStatusLineCount > 0 ||
+              summary.hasChanges ||
               summary.linkedDirs.some((dir) => dir.status === 'error' || dir.status === 'not_git');
             if (hasRelevantRepoSignal) {
               design.runs.setRepoChanges(run, summary);

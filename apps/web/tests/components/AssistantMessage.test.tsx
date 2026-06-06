@@ -720,6 +720,57 @@ describe('AssistantMessage linked repo changes', () => {
     expect(screen.getByText('?? src/new.ts')).toBeTruthy();
   });
 
+  it('shows clean linked repo ref updates as run output', () => {
+    render(
+      <I18nProvider initial="en">
+        <AssistantMessage
+          message={baseMessage({
+            content: '',
+            events: [
+              {
+                kind: 'repo_changes',
+                summary: {
+                  generatedAt: 1700000000,
+                  linkedDirCount: 1,
+                  changedFileCount: 0,
+                  newStatusLineCount: 0,
+                  preexistingChangeCount: 0,
+                  untrackedFileCount: 0,
+                  refChangeCount: 1,
+                  hasChanges: true,
+                  linkedDirs: [
+                    {
+                      path: '/repo/app',
+                      status: 'clean',
+                      branch: 'main',
+                      headSha: 'def5678',
+                      headChanged: true,
+                      changedFileCount: 0,
+                      newStatusLineCount: 0,
+                      preexistingChangeCount: 0,
+                      untrackedFileCount: 0,
+                      statusLines: [],
+                      diffStat: null,
+                      error: null,
+                    },
+                  ],
+                },
+              } as ChatMessage['events'][number],
+            ],
+            producedFiles: [],
+          })}
+          streaming={false}
+          projectId="proj-1"
+        />
+      </I18nProvider>,
+    );
+
+    expect(screen.getByTestId('linked-repo-changes')).toBeTruthy();
+    expect(screen.getAllByText('1 ref update')).toHaveLength(2);
+    expect(screen.getByText('main · def5678')).toBeTruthy();
+    expect(screen.queryByText('0 files')).toBeNull();
+  });
+
   it('shows non-git linked dirs as visible error rows', () => {
     render(
       <AssistantMessage

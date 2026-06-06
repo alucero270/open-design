@@ -98,7 +98,7 @@ describe('linked repo change summaries', () => {
     });
   });
 
-  it('treats status-only transitions on the same path as pre-existing changes', () => {
+  it('treats unchanged already-dirty paths as pre-existing changes', () => {
     const before: LinkedRepoSnapshot = {
       generatedAt: 1,
       linkedDirs: [
@@ -108,7 +108,7 @@ describe('linked repo change summaries', () => {
           branch: 'main',
           headSha: 'abc1234',
           statusLines: [' M src/app.ts'],
-          statusFingerprints: ['src/app.ts\u0000worktree:same-content'],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content\u0000status: M'],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',
@@ -124,8 +124,8 @@ describe('linked repo change summaries', () => {
           status: 'changed',
           branch: 'main',
           headSha: 'abc1234',
-          statusLines: ['M  src/app.ts'],
-          statusFingerprints: ['src/app.ts\u0000worktree:same-content'],
+          statusLines: [' M src/app.ts'],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content\u0000status: M'],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',
@@ -140,11 +140,62 @@ describe('linked repo change summaries', () => {
       changedFileCount: 1,
       newStatusLineCount: 0,
       preexistingChangeCount: 1,
+      hasChanges: false,
     });
     expect(summary.linkedDirs[0]).toMatchObject({
       changedFileCount: 1,
       newStatusLineCount: 0,
       preexistingChangeCount: 1,
+    });
+  });
+
+  it('treats clean HEAD changes as run output', () => {
+    const before: LinkedRepoSnapshot = {
+      generatedAt: 1,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'clean',
+          branch: 'main',
+          headSha: 'abc1234',
+          statusLines: [],
+          statusLineCount: 0,
+          untrackedFileCount: 0,
+          diffStat: null,
+          error: null,
+        },
+      ],
+    };
+    const after: LinkedRepoSnapshot = {
+      generatedAt: 2,
+      linkedDirs: [
+        {
+          path: '/repo',
+          status: 'clean',
+          branch: 'main',
+          headSha: 'def5678',
+          statusLines: [],
+          statusLineCount: 0,
+          untrackedFileCount: 0,
+          diffStat: null,
+          error: null,
+        },
+      ],
+    };
+
+    const summary = summarizeLinkedRepoChanges(before, after);
+
+    expect(summary).toMatchObject({
+      changedFileCount: 0,
+      newStatusLineCount: 0,
+      preexistingChangeCount: 0,
+      refChangeCount: 1,
+      hasChanges: true,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      status: 'clean',
+      headSha: 'def5678',
+      headChanged: true,
     });
   });
 
@@ -574,7 +625,7 @@ describe('linked repo change summaries', () => {
           branch: 'main',
           headSha: 'abc1234',
           statusLines: [' M src/app.ts'],
-          statusFingerprints: ['src/app.ts\u0000status: M'],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content\u0000status: M'],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',
@@ -591,7 +642,7 @@ describe('linked repo change summaries', () => {
           branch: 'main',
           headSha: 'abc1234',
           statusLines: ['M  src/app.ts'],
-          statusFingerprints: ['src/app.ts\u0000status:M '],
+          statusFingerprints: ['src/app.ts\u0000worktree:same-content\u0000status:M '],
           statusLineCount: 1,
           untrackedFileCount: 0,
           diffStat: 'src/app.ts | 2 ++',

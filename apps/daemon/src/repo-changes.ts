@@ -82,6 +82,14 @@ export function summarizeLinkedRepoChanges(
   const beforeByPath = new Map(before.linkedDirs.map((dir) => [dir.path, dir]));
   const linkedDirs: LinkedRepoChangeDirectorySummary[] = after.linkedDirs.map((dir) => {
     const baseline = beforeByPath.get(dir.path);
+    const comparableRefs =
+      !!baseline &&
+      dir.status !== 'error' &&
+      dir.status !== 'not_git' &&
+      baseline.status !== 'error' &&
+      baseline.status !== 'not_git';
+    const branchChanged = comparableRefs && baseline.branch !== dir.branch;
+    const headChanged = comparableRefs && baseline.headSha !== dir.headSha;
     const baselinePaths = new Set(statusPathSetsForDir(baseline).flat());
     const baselineFingerprintCounts = statusFingerprintsForDir(baseline).reduce((counts, fingerprint) => {
       counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
@@ -104,6 +112,8 @@ export function summarizeLinkedRepoChanges(
       status: dir.status,
       branch: dir.branch,
       headSha: dir.headSha,
+      ...(branchChanged ? { branchChanged: true } : {}),
+      ...(headChanged ? { headChanged: true } : {}),
       changedFileCount: dir.statusLineCount,
       newStatusLineCount,
       preexistingChangeCount,
@@ -119,6 +129,7 @@ export function summarizeLinkedRepoChanges(
   const newStatusLineCount = linkedDirs.reduce((sum, dir) => sum + dir.newStatusLineCount, 0);
   const preexistingChangeCount = linkedDirs.reduce((sum, dir) => sum + dir.preexistingChangeCount, 0);
   const untrackedFileCount = linkedDirs.reduce((sum, dir) => sum + dir.untrackedFileCount, 0);
+  const refChangeCount = linkedDirs.filter((dir) => dir.branchChanged || dir.headChanged).length;
   return {
     generatedAt: after.generatedAt,
     linkedDirCount: linkedDirs.length,
@@ -126,7 +137,8 @@ export function summarizeLinkedRepoChanges(
     newStatusLineCount,
     preexistingChangeCount,
     untrackedFileCount,
-    hasChanges: changedFileCount > 0,
+    refChangeCount,
+    hasChanges: newStatusLineCount > 0 || refChangeCount > 0,
     linkedDirs,
   };
 }

@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -27,6 +28,11 @@ type RunStatus = {
   error: string | null;
   errorCode: string | null;
   eventsLogPath: string;
+  repoChanges?: {
+    hasChanges: boolean;
+    newStatusLineCount: number;
+    linkedDirs: Array<{ status: string; statusLines: string[] }>;
+  } | null;
 };
 
 type RunEvent = {
@@ -171,6 +177,50 @@ describe('same-run retry runtime', () => {
     expect(secondAttemptSessionId).toBeTruthy();
     expect(secondAttemptSessionId).not.toBe(firstAttemptSessionId);
   });
+
+  it('does not retry a watchdog failure after linked repo changes are captured', async () => {
+    binDir = await mkdtemp(path.join(os.tmpdir(), 'od-run-retry-linked-bin-'));
+    const linkedRepo = path.join(binDir, 'linked-repo');
+    await initLinkedRepo(linkedRepo);
+    const { bin: fakeClaude } = await writeStallingClaude(binDir, 'claude-stall-linked', {
+      linkedRepoPath: linkedRepo,
+    });
+
+    delete process.env.POSTHOG_KEY;
+    delete process.env.POSTHOG_HOST;
+    delete process.env.LANGFUSE_PUBLIC_KEY;
+    delete process.env.LANGFUSE_SECRET_KEY;
+    delete process.env.LANGFUSE_BASE_URL;
+    delete process.env.OPEN_DESIGN_TELEMETRY_RELAY_URL;
+    process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = '400';
+
+    started = await startServer({ port: 0, returnServer: true }) as StartedServer;
+    await putConfig(started.url, {
+      agentId: 'claude',
+      agentCliEnv: { claude: { CLAUDE_BIN: fakeClaude } },
+      telemetry: { metrics: true, content: false, artifactManifest: false },
+      privacyDecisionAt: Date.now(),
+    });
+
+    const run = await createAndWaitForRun(started.url, { linkedDirs: [linkedRepo] });
+    expect(run.status).toBe('failed');
+    expect(run.repoChanges).toMatchObject({
+      hasChanges: true,
+      newStatusLineCount: 1,
+      linkedDirs: [
+        expect.objectContaining({
+          status: 'changed',
+          statusLines: expect.arrayContaining(['?? retry-output.ts']),
+        }),
+      ],
+    });
+
+    const events = await readRunEvents(run.eventsLogPath);
+    expect(events.filter((event) => event.event === 'start')).toHaveLength(1);
+    expect(events.filter((event) => event.event === 'repo_changes')).toHaveLength(1);
+    expect(events.filter((event) => event.event === 'run_retry_attempted')).toHaveLength(0);
+    expect(events.filter((event) => event.event === 'end')).toHaveLength(1);
+  });
 });
 
 function snapshotEnv(): Record<string, string | undefined> {
@@ -232,14 +282,18 @@ if (attempts === 0) {
 async function writeStallingClaude(
   dir: string,
   name: string,
+  options: { linkedRepoPath?: string } = {},
 ): Promise<{ bin: string; argsLogPath: string }> {
   const bin = path.join(dir, name);
   const counterPath = path.join(dir, `${name}-attempts`);
   const argsLogPath = path.join(dir, `${name}-args.jsonl`);
+  const linkedRepoPath = options.linkedRepoPath ?? null;
   await writeFile(bin, `#!/usr/bin/env node
 const fs = require('node:fs');
+const path = require('node:path');
 const counterPath = ${JSON.stringify(counterPath)};
 const argsLogPath = ${JSON.stringify(argsLogPath)};
+const linkedRepoPath = ${JSON.stringify(linkedRepoPath)};
 if (process.argv.includes('--version')) {
   console.log('claude-code 1.0.0-retry-stall');
   process.exit(0);
@@ -253,6 +307,9 @@ try { attempts = Number(fs.readFileSync(counterPath, 'utf8')) || 0; } catch {}
 fs.writeFileSync(counterPath, String(attempts + 1));
 fs.appendFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)) + '\\n');
 if (attempts === 0) {
+  if (linkedRepoPath) {
+    fs.writeFileSync(path.join(linkedRepoPath, 'retry-output.ts'), 'export const retryOutput = true;\\n');
+  }
   // First attempt: emit nothing on stdout/stderr and hang well past the
   // inactivity watchdog window so the daemon classifies a silent first-token
   // stall. Exit cleanly when the watchdog SIGTERMs us (default Node behavior),
@@ -284,7 +341,10 @@ async function putConfig(url: string, patch: Record<string, unknown>): Promise<v
   expect(response.status).toBe(200);
 }
 
-async function createAndWaitForRun(url: string): Promise<RunStatus> {
+async function createAndWaitForRun(
+  url: string,
+  options: { linkedDirs?: string[] } = {},
+): Promise<RunStatus> {
   const projectId = `retry_runtime_${randomUUID()}`;
   const projectResponse = await fetch(`${url}/api/projects`, {
     method: 'POST',
@@ -292,7 +352,10 @@ async function createAndWaitForRun(url: string): Promise<RunStatus> {
     body: JSON.stringify({
       id: projectId,
       name: 'Retry runtime smoke',
-      metadata: { kind: 'prototype' },
+      metadata: {
+        kind: 'prototype',
+        ...(options.linkedDirs ? { linkedDirs: options.linkedDirs } : {}),
+      },
       skipDiscoveryBrief: true,
     }),
   });
@@ -320,6 +383,16 @@ async function createAndWaitForRun(url: string): Promise<RunStatus> {
   expect(runResponse.status).toBe(202);
   const body = await runResponse.json() as { runId: string };
   return await waitForRun(url, body.runId);
+}
+
+async function initLinkedRepo(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'README.md'), '# Retry linked repo fixture\n', 'utf8');
+  execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'Open Design Test'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['add', 'README.md'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'initial fixture'], { cwd: dir, stdio: 'ignore' });
 }
 
 async function waitForRun(url: string, runId: string): Promise<RunStatus> {

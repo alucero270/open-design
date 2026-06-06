@@ -245,6 +245,8 @@ export interface LinkedRepoChangeDirectorySummary {
   status: LinkedRepoChangeStatus;
   branch?: string | null;
   headSha?: string | null;
+  branchChanged?: boolean;
+  headChanged?: boolean;
   changedFileCount: number;
   newStatusLineCount: number;
   preexistingChangeCount: number;
@@ -263,6 +265,7 @@ export interface LinkedRepoChangeSummary {
   newStatusLineCount: number;
   preexistingChangeCount: number;
   untrackedFileCount: number;
+  refChangeCount?: number;
   hasChanges: boolean;
   linkedDirs: LinkedRepoChangeDirectorySummary[];
 }

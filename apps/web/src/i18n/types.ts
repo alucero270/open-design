@@ -2910,6 +2910,8 @@ export interface Dict {
   'assistant.linkedRepoUntrackedFilePlural': string;
   'assistant.linkedRepoPreexistingChangeSingular': string;
   'assistant.linkedRepoPreexistingChangePlural': string;
+  'assistant.linkedRepoRefUpdateSingular': string;
+  'assistant.linkedRepoRefUpdatePlural': string;
   'assistant.linkedRepoFileSingular': string;
   'assistant.linkedRepoFilePlural': string;
   'assistant.linkedRepoSummarySeparator': string;

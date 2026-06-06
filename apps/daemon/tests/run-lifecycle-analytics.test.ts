@@ -160,6 +160,7 @@ describe('run retry analytics helpers', () => {
       { event: 'agent', data: { type: 'text_delta', delta: 'hello' } },
       { event: 'agent', data: { type: 'tool_use', id: 't1', name: 'Read', input: {} } },
       { event: 'agent', data: { type: 'live_artifact' } },
+      { event: 'repo_changes', data: { linkedDirs: [{ path: '/repo' }] } },
     ])).toMatchObject({
       userVisibleOutputSeen: true,
       toolCallSeen: true,
