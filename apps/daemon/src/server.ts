@@ -11697,6 +11697,8 @@ export async function startServer({
     let linkedRepoCaptureAttemptId = 0;
     let terminalErrorAfterLinkedRepoChangesPromise = null;
     const resetLinkedRepoCaptureStateForRetry = () => {
+      // Clear the pending capture promise and increment attempt ID so any
+      // in-flight captures from the previous attempt will be ignored when they complete.
       linkedRepoChangesCapturePromise = null;
       terminalErrorAfterLinkedRepoChangesPromise = null;
       linkedRepoCaptureAttemptId += 1;
