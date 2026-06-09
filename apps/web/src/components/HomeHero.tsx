@@ -55,6 +55,13 @@ import {
 } from '../utils/inlineMentions';
 import { useI18n, useT } from '../i18n';
 import { localizePluginDescription, localizePluginTitle } from './plugins-home/localization';
+import {
+  examplePresetSeedPrompt,
+  pluginPresetQuery,
+  renderPluginPresetQuery,
+  promptLocaleKind,
+  type PromptLocaleKind,
+} from './plugins-home/presetSeedPrompt';
 import type { Locale } from '../i18n/types';
 import {
   localizeSkillDescription,
@@ -67,6 +74,7 @@ import { applyFacetSelection } from './plugins-home/facets';
 import { inferPluginPreview } from './plugins-home/preview';
 import { SessionModeToggle } from './SessionModeToggle';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
+import { WorkingDirPicker } from './WorkingDirPicker';
 import {
   LexicalComposerInput,
   type LexicalComposerInputHandle,
@@ -94,12 +102,17 @@ export interface ExamplePromptInfo {
 }
 
 interface Props {
+  active?: boolean;
   prompt: string;
   onPromptChange: (value: string) => void;
   onSubmit: HomeHeroSubmitHandler;
   sessionMode?: ChatSessionMode;
   onSessionModeChange?: (mode: ChatSessionMode) => void;
   activePluginTitle: string | null;
+  // True when the active plugin chip shows a user-picked plugin (Community card
+  // or example-prompt preset) rather than a task-type chip's default plugin —
+  // an explicit pick owns its own clear (×) button even when a task chip is set.
+  activePluginIsExplicit?: boolean;
   activePluginRecord?: InstalledPluginRecord | null;
   activeChipId: string | null;
   onClearActivePlugin: () => void;
@@ -154,13 +167,22 @@ interface Props {
   error: string | null;
   showActivePluginChip?: boolean;
   workingDir?: string | null;
+  recentDirs?: string[];
   onPickWorkingDir?: () => void;
+  onSelectRecentWorkingDir?: (dir: string) => void;
   onClearWorkingDir?: () => void;
   onExamplePromptStatusChange?: (info: ExamplePromptInfo | null) => void;
   executionSwitcher?: ReactNode;
 }
 
 type HomeMentionTab = 'all' | 'files' | 'plugins' | 'skills' | 'mcp' | 'connectors';
+
+// In the combined "All" overview, every surface is capped to a handful of top
+// matches so no single section floods the picker. The dedicated "Design files"
+// tab is exempt: staged files are the user's own finite content, so that tab
+// lists every match (the results panel scrolls) and its count reflects the true
+// total rather than the truncated preview.
+const HOME_MENTION_ALL_TAB_PREVIEW = 6;
 
 interface HomeMentionOption {
   id: string;
@@ -198,12 +220,14 @@ const EMPTY_CONNECTOR_OPTIONS: ConnectorDetail[] = [];
 
 export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
   {
+    active = true,
     prompt,
     onPromptChange,
     onSubmit,
     sessionMode = 'design',
     onSessionModeChange,
     activePluginTitle,
+    activePluginIsExplicit = false,
     activePluginRecord = null,
     activeSkillId = null,
     activeSkillTitle = null,
@@ -250,7 +274,9 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
     error,
     showActivePluginChip = true,
     workingDir = null,
+    recentDirs = [],
     onPickWorkingDir,
+    onSelectRecentWorkingDir,
     onClearWorkingDir,
     onExamplePromptStatusChange,
     executionSwitcher,
@@ -276,6 +302,8 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
   const [mentionTrigger, setMentionTrigger] = useState<{ query: string } | null>(null);
   const [caretRect, setCaretRect] = useState<CaretRect | null>(null);
   const editorRef = useRef<LexicalComposerInputHandle | null>(null);
+  const promptEditorRef = useRef<HTMLDivElement | null>(null);
+  const mentionPickerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const shortcutsMenuRef = useRef<HTMLDivElement>(null);
   const canSubmit = (prompt.trim().length > 0 || stagedFiles.length > 0) && !submitDisabled;
@@ -295,23 +323,22 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
         ? stagedFiles
             .map((file, index) => ({ file, index }))
             .filter(({ file }) => fileMatchesQuery(file, mentionQuery))
-            .slice(0, 6)
         : [],
     [mentionActive, mentionQuery, stagedFiles],
   );
   const pluginMatches = useMemo(
     () =>
       mentionActive
-        ? pluginOptions.filter((plugin) => pluginMatchesQuery(plugin, mentionQuery)).slice(0, 6)
+        ? pluginOptions.filter((plugin) => pluginMatchesQuery(plugin, mentionQuery, locale))
         : [],
-    [mentionActive, mentionQuery, pluginOptions],
+    [locale, mentionActive, mentionQuery, pluginOptions],
   );
   const skillMatches = useMemo(
     () =>
       mentionActive
-        ? skillOptions.filter((skill) => skillMatchesQuery(skill, mentionQuery)).slice(0, 6)
+        ? skillOptions.filter((skill) => skillMatchesQuery(skill, mentionQuery, locale))
         : [],
-    [mentionActive, mentionQuery, skillOptions],
+    [locale, mentionActive, mentionQuery, skillOptions],
   );
   const mcpMatches = useMemo(
     () =>
@@ -327,9 +354,13 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
         : [],
     [connectorOptions, mentionActive, mentionQuery],
   );
-  const pickerOpen = mentionActive;
+  const pickerOpen = active && mentionActive;
   const tabs: Array<{ id: HomeMentionTab; label: string; count: number }> = [
-    { id: 'all', label: t('common.all'), count: fileMatches.length + pluginMatches.length + skillMatches.length + mcpMatches.length + connectorMatches.length },
+    // The All overview previews at most HOME_MENTION_ALL_TAB_PREVIEW files, so
+    // its badge counts the previewed slice — not the full staged total — to keep
+    // the count aligned with what that tab actually renders. The dedicated files
+    // tab below lists every match and reports the true total.
+    { id: 'all', label: t('common.all'), count: Math.min(fileMatches.length, HOME_MENTION_ALL_TAB_PREVIEW) + pluginMatches.length + skillMatches.length + mcpMatches.length + connectorMatches.length },
     { id: 'files', label: t('chat.mentionTabFiles'), count: fileMatches.length },
     { id: 'plugins', label: t('entry.navPlugins'), count: pluginMatches.length },
     { id: 'skills', label: t('homeHero.skills'), count: skillMatches.length },
@@ -346,7 +377,7 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
       ? {
           id: 'files',
           label: t('chat.mentionSectionFiles'),
-          options: fileMatches.map(({ file, index }) => ({
+          options: (mentionTab === 'files' ? fileMatches : fileMatches.slice(0, HOME_MENTION_ALL_TAB_PREVIEW)).map(({ file, index }) => ({
             id: `file-${index}-${file.name}`,
             icon: isImageFile(file) ? 'image' : 'file',
             title: file.name,
@@ -522,6 +553,38 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
   }, [pickerOpen]);
 
   useEffect(() => {
+    if (!pickerOpen) return;
+    const isInsideMentionSurface = (target: EventTarget | null) => {
+      if (!(target instanceof Node)) return false;
+      return (
+        promptEditorRef.current?.contains(target) ||
+        mentionPickerRef.current?.contains(target)
+      );
+    };
+    const closePicker = () => {
+      setMentionTrigger(null);
+      setMentionTab('all');
+    };
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!isInsideMentionSurface(event.target)) closePicker();
+    };
+    const closeOnOutsideMouse = (event: MouseEvent) => {
+      if (!isInsideMentionSurface(event.target)) closePicker();
+    };
+    const closeOnOutsideFocus = (event: FocusEvent) => {
+      if (!isInsideMentionSurface(event.target)) closePicker();
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    document.addEventListener('mousedown', closeOnOutsideMouse, true);
+    document.addEventListener('focusin', closeOnOutsideFocus);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+      document.removeEventListener('mousedown', closeOnOutsideMouse, true);
+      document.removeEventListener('focusin', closeOnOutsideFocus);
+    };
+  }, [pickerOpen]);
+
+  useEffect(() => {
     setSelectedPromptExample(null);
     setSelectedSubcategory(null);
   }, [activeChipId]);
@@ -651,6 +714,12 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
     slash: { q: string } | null;
     anchorRect: CaretRect | null;
   }) {
+    if (!active) {
+      setCaretRect(null);
+      setMentionTrigger(null);
+      setMentionTab('all');
+      return;
+    }
     setCaretRect(anchorRect);
     if (nextMention) {
       setMentionTrigger((prev) => {
@@ -669,6 +738,10 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
     setHoveredPlugin(null);
     setSelectedIndex(0);
   }
+
+  useEffect(() => {
+    if (!active) dismissMentionPicker();
+  }, [active]);
 
   // Routes popover navigation keys from the Lexical editor over the visible
   // picker option union. Returns true when consumed so the editor can
@@ -712,6 +785,12 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
   }
 
   function usePromptExample(example: string) {
+    trackHomeChatComposerClick(analytics.track, {
+      page_name: 'home',
+      area: 'chat_composer',
+      element: 'example_prompt',
+      chip_id: activeChipId ?? 'prototype',
+    });
     setSelectedPromptExample({
       label: promptExampleChipLabel(example),
       promptText: example,
@@ -728,6 +807,14 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
   }
 
   function pickExamplePluginPreset(record: InstalledPluginRecord, chipId: string, promptText: string) {
+    trackHomeChatComposerClick(analytics.track, {
+      page_name: 'home',
+      area: 'chat_composer',
+      element: 'example_prompt',
+      chip_id: chipId,
+      plugin_id: record.sourceMarketplaceEntryName ?? record.id,
+      plugin_type: record.marketplaceTrust ?? 'official',
+    });
     setSelectedPromptExample({
       label: record.title,
       promptText,
@@ -898,11 +985,19 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
                   </span>
                   <span className="home-hero__active-label">{activePluginTitle}</span>
                 </button>
-                {activeCreateChip ? null : (
+                {activeCreateChip && !activePluginIsExplicit ? null : (
                   <button
                     type="button"
                     className="home-hero__active-clear od-tooltip"
-                    onClick={onClearActivePlugin}
+                    onClick={() => {
+                      trackHomeChatComposerClick(analytics.track, {
+                        page_name: 'home',
+                        area: 'chat_composer',
+                        element: 'plugin_chip_clear',
+                        chip_id: activePluginRecord?.id,
+                      });
+                      onClearActivePlugin();
+                    }}
                     aria-label={t('homeHero.clearActivePlugin')}
                     title={t('homeHero.clearActivePlugin')}
                     data-tooltip={t('homeHero.clearActivePlugin')}
@@ -1008,7 +1103,7 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
           </div>
         ) : null}
         <div className="home-hero__prompt-surface">
-          <div className="home-hero__prompt-editor home-hero__lexical">
+          <div ref={promptEditorRef} className="home-hero__prompt-editor home-hero__lexical">
             <LexicalComposerInput
               ref={editorRef}
               testId="home-hero-input"
@@ -1048,6 +1143,7 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
         </div>
         <CaretFloatingLayer caret={caretRect} open={pickerOpen}>
           <div
+            ref={mentionPickerRef}
             id="home-hero-context-picker"
             className="home-hero__plugin-picker home-hero__plugin-picker--floating"
             role="listbox"
@@ -1252,46 +1348,6 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
                 fileInputRef.current?.click();
               }}
             />
-            {onPickWorkingDir ? (
-              <div className="home-hero__working-dir-wrap">
-                <button
-                  type="button"
-                  className={`home-hero__working-dir od-tooltip${workingDir ? ' picked' : ''}`}
-                  onClick={() => {
-                    trackHomeChatComposerClick(analytics.track, {
-                      page_name: 'home',
-                      area: 'chat_composer',
-                      element: 'working_dir',
-                    });
-                    onPickWorkingDir?.();
-                  }}
-                  title={workingDir ?? t('workingDirPicker.homeTitle')}
-                  data-tooltip={workingDir ?? t('workingDirPicker.homeTitle')}
-                >
-                  <Icon name="folder" size={13} />
-                  <span>
-                    {workingDir ? workingDir.split(/[/\\]/).filter(Boolean).pop() : t('workingDirPicker.select')}
-                  </span>
-                </button>
-                {workingDir ? (
-                  <button
-                    type="button"
-                    className="home-hero__working-dir-clear"
-                    onClick={() => {
-                      trackHomeChatComposerClick(analytics.track, {
-                        page_name: 'home',
-                        area: 'chat_composer',
-                        element: 'working_dir_clear',
-                      });
-                      onClearWorkingDir?.();
-                    }}
-                    aria-label={t('workingDirPicker.clearAria')}
-                  >
-                    <Icon name="close" size={10} />
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
             {activeCreateChip ? (
               <ActiveTypeChip chip={activeCreateChip} onClear={onClearActiveChip} />
             ) : null}
@@ -1354,6 +1410,39 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
         </div>
       </div>
 
+      {onPickWorkingDir ? (
+        <div className="home-hero__workdir-row">
+          <WorkingDirPicker
+            workingDir={workingDir}
+            recentDirs={recentDirs}
+            onPickDirectory={() => {
+              trackHomeChatComposerClick(analytics.track, {
+                page_name: 'home',
+                area: 'chat_composer',
+                element: 'working_dir',
+              });
+              onPickWorkingDir();
+            }}
+            onSelectRecent={(dir) => {
+              trackHomeChatComposerClick(analytics.track, {
+                page_name: 'home',
+                area: 'chat_composer',
+                element: 'working_dir_recent',
+              });
+              onSelectRecentWorkingDir?.(dir);
+            }}
+            onClear={() => {
+              trackHomeChatComposerClick(analytics.track, {
+                page_name: 'home',
+                area: 'chat_composer',
+                element: 'working_dir_clear',
+              });
+              onClearWorkingDir?.();
+            }}
+          />
+        </div>
+      ) : null}
+
       {activeCreateChip ? null : (
         <RailGroup
           group="create"
@@ -1385,10 +1474,26 @@ export const HomeHero = forwardRef<HomeHeroHandle, Props>(function HomeHero(
           subChips={activeSubChips}
           selectedSlug={selectedSubcategory}
           pluginsLoading={pluginsLoading}
-          onPickSubChip={(sub) =>
-            setSelectedSubcategory((current) => (current === sub.slug ? null : sub.slug))
-          }
-          onSelectAll={() => setSelectedSubcategory(null)}
+          onPickSubChip={(sub) => {
+            trackHomeChatComposerClick(analytics.track, {
+              page_name: 'home',
+              area: 'chat_composer',
+              element: 'subcategory_chip',
+              chip_id: activeChipId ?? undefined,
+              subcategory: sub.slug,
+            });
+            setSelectedSubcategory((current) => (current === sub.slug ? null : sub.slug));
+          }}
+          onSelectAll={() => {
+            trackHomeChatComposerClick(analytics.track, {
+              page_name: 'home',
+              area: 'chat_composer',
+              element: 'subcategory_chip',
+              chip_id: activeChipId ?? undefined,
+              subcategory: 'all',
+            });
+            setSelectedSubcategory(null);
+          }}
         />
       ) : null}
 
@@ -1522,8 +1627,14 @@ function PluginPromptPresetCard({
   pending: boolean;
   record: InstalledPluginRecord;
 }) {
-  const preview = useMemo(() => inferPluginPreview(record), [record]);
-  const seedPrompt = examplePresetSeedPrompt(record, locale, chipId);
+  // Example-prompt preset tiles are thumbnails too — prefer the cheap baked
+  // hover-pan clip when one exists (same as the gallery cards).
+  const preview = useMemo(() => inferPluginPreview(record, { preferBaked: true }), [record]);
+  // Home cards keep their richer structured-preview path as the last-resort
+  // fallback (the detail modal injects a simpler one).
+  const seedPrompt = examplePresetSeedPrompt(record, locale, () =>
+    pluginPresetPromptPreview(record, locale, chipId),
+  ).text;
   return (
     <button
       type="button"
@@ -1584,9 +1695,6 @@ function formatFileSize(bytes: number): string {
 
 const HOME_HERO_PROMPT_MAX_HEIGHT = 180;
 const HOME_HERO_AUTHORING_PROMPT_MAX_HEIGHT = 132;
-// `{{name}}` plugin-input placeholder — still used when rendering plugin
-// preset query previews (renderPluginPresetQuery).
-const INPUT_PLACEHOLDER_PATTERN = /\{\{\s*([a-zA-Z_][\w-]*)\s*\}\}/g;
 
 function pluginMentionText(record: InstalledPluginRecord): string {
   return inlineMentionToken(record.title);
@@ -2234,14 +2342,16 @@ function fileMatchesQuery(file: File, query: string): boolean {
     .includes(q);
 }
 
-function pluginMatchesQuery(plugin: InstalledPluginRecord, query: string): boolean {
+function pluginMatchesQuery(plugin: InstalledPluginRecord, query: string, locale: Locale): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return [
     plugin.title,
+    localizePluginTitle(locale, plugin),
     plugin.id,
     plugin.sourceKind,
     plugin.manifest?.description ?? '',
+    localizePluginDescription(locale, plugin),
     ...(plugin.manifest?.tags ?? []),
   ]
     .join(' ')
@@ -2249,13 +2359,15 @@ function pluginMatchesQuery(plugin: InstalledPluginRecord, query: string): boole
     .includes(q);
 }
 
-function skillMatchesQuery(skill: SkillSummary, query: string): boolean {
+function skillMatchesQuery(skill: SkillSummary, query: string, locale: Locale): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return [
     skill.id,
     skill.name,
+    localizeSkillName(locale, skill),
     skill.description,
+    localizeSkillDescription(locale, skill),
     skill.mode,
     skill.surface ?? '',
     ...skill.triggers,
@@ -2587,12 +2699,22 @@ function homeHeroChipTitle(chip: HomeHeroChip, t: ReturnType<typeof useT>): stri
   }
 }
 
-function homeHeroExamplePluginsForChip(
+// Generic catch-all scenario routers are not real "example" templates: they
+// ship no concrete seed for the gallery and only exist as the silent default
+// binding a media surface carries (see scenario-defaults.ts). Keep them out of
+// the example-prompt presets so e.g. the "Media generation (default scenario)"
+// card never appears under the audio/image/video chips — and, because the
+// example card's selected state is keyed on the active plugin id, never shows
+// up pre-selected when a media mode is entered.
+const EXAMPLE_PRESET_HIDDEN_PLUGIN_IDS = new Set<string>(['od-media-generation']);
+
+export function homeHeroExamplePluginsForChip(
   chipId: string,
   plugins: InstalledPluginRecord[],
   locale: Locale,
 ): InstalledPluginRecord[] {
   const presets = plugins
+    .filter((plugin) => !EXAMPLE_PRESET_HIDDEN_PLUGIN_IDS.has(plugin.id))
     .filter((plugin) => (
       pluginMatchesExampleChip(plugin, chipId) ||
       curatedPluginPriorityForChip(plugin, chipId) !== null
@@ -2640,7 +2762,7 @@ function movePluginPresetToEnd(
   ];
 }
 
-function pluginMatchesExampleChip(record: InstalledPluginRecord, chipId: string): boolean {
+export function pluginMatchesExampleChip(record: InstalledPluginRecord, chipId: string): boolean {
   const slugs = pluginRecordSlugs(record);
   const has = (...values: string[]) => values.some((value) => slugs.has(value));
   const hasPart = (...values: string[]) => {
@@ -2663,7 +2785,10 @@ function pluginMatchesExampleChip(record: InstalledPluginRecord, chipId: string)
     case 'video':
       return (has('video') || hasPart('video-template')) && !hasPart('hyperframes', 'audio');
     case 'audio':
-      return has('audio') || hasPart('audio');
+      // Exclude video / HyperFrames templates that merely carry an
+      // `audio-reactive` tag (substring-matched by hasPart('audio')): their
+      // home is the Video / HyperFrames chips, not the audio gallery.
+      return (has('audio') || hasPart('audio')) && !hasPart('video', 'hyperframes');
     default:
       return false;
   }
@@ -2721,91 +2846,6 @@ function pluginPresetPromptPreview(
     ? renderPluginPresetQuery(record, query)
     : localizePluginDescription(locale, record);
   return textPromptForPluginPreset(record, rendered, chipId, locale);
-}
-
-// The seed text dropped into the composer when a preset card is picked.
-// The full build spec now rides along as plugin context (SKILL.md +
-// example.html injected once the plugin is applied), so the textarea only
-// needs a short, human-readable, editable hook — not the verbatim spec.
-function examplePresetSeedPrompt(
-  record: InstalledPluginRecord,
-  locale: Locale,
-  chipId: string,
-): string {
-  const description = localizePluginDescription(locale, record).trim();
-  // zh: the localized useCase.query is a generator-facing meta-instruction
-  // ("follow the en field verbatim; start from example.html"), useless as a
-  // human seed — surface the curated one-line description instead.
-  if (promptLocaleKind(locale) === 'zh' && description) return description;
-  const query = pluginPresetQuery(record, locale);
-  if (query) {
-    const head = firstPromptParagraph(renderPluginPresetQuery(record, query));
-    // Skip meta-instructions that reference fields/assets the model can't see
-    // from the textarea; fall back to the description.
-    if (head && !isMetaInstructionSeed(head)) return head;
-  }
-  if (description) return description;
-  return pluginPresetPromptPreview(record, locale, chipId);
-}
-
-function firstPromptParagraph(value: string): string {
-  const normalized = value.replace(/\r\n/g, '\n').trim();
-  if (!normalized) return '';
-  // First paragraph = text up to the first blank line / markdown rule fence.
-  const [head] = normalized.split(/\n\s*\n/);
-  return (head ?? normalized).trim();
-}
-
-function isMetaInstructionSeed(value: string): boolean {
-  return /逐字注入|以\s*en\s*字段为准|verbatim|example\.html/iu.test(value);
-}
-
-function pluginPresetQuery(record: InstalledPluginRecord, locale: Locale): string | null {
-  const query = record.manifest?.od?.useCase?.query;
-  if (typeof query === 'string') return query;
-  if (query && typeof query === 'object') {
-    const localized = query as Record<string, unknown>;
-    const exact = localized[locale];
-    if (typeof exact === 'string') return exact;
-    const language = locale.split('-')[0];
-    const languageMatch = Object.entries(localized).find(([key, value]) => (
-      key.toLowerCase().startsWith(`${language}-`) && typeof value === 'string'
-    ));
-    if (typeof languageMatch?.[1] === 'string') return languageMatch[1];
-    for (const key of ['zh-CN', 'en', 'default']) {
-      if (typeof localized[key] === 'string') return localized[key];
-    }
-    const first = Object.values(localized).find((value) => typeof value === 'string');
-    if (typeof first === 'string') return first;
-  }
-  return null;
-}
-
-function renderPluginPresetQuery(record: InstalledPluginRecord, query: string): string {
-  const fields = record.manifest?.od?.inputs ?? [];
-  const valueByName = new Map<string, string>();
-  for (const field of fields) {
-    const value = field.default ?? field.placeholder ?? field.label ?? field.name;
-    valueByName.set(field.name, String(value));
-  }
-  return query
-    .replace(
-      HOME_ESCAPED_ARGUMENT_PLACEHOLDER_PATTERN,
-      (_placeholder, _name: string | undefined, defaultValue: string | undefined) => defaultValue ?? '',
-    )
-    .replace(
-      HOME_ARGUMENT_PLACEHOLDER_PATTERN,
-      (
-        _placeholder,
-        _doubleName: string | undefined,
-        _singleName: string | undefined,
-        doubleDefault: string | undefined,
-        singleDefault: string | undefined,
-      ) => doubleDefault ?? singleDefault ?? '',
-    )
-    .replace(INPUT_PLACEHOLDER_PATTERN, (_placeholder, key: string) => (
-      valueByName.get(key) ?? key
-    ));
 }
 
 function textPromptForPluginPreset(
@@ -2983,12 +3023,6 @@ function fallbackPluginPresetPrompt(
   }
   return `Create ${englishArticle(artifact)} ${artifact} with the "${title}" preset${description ? `: ${description}` : '.'}`;
 }
-
-const HOME_ESCAPED_ARGUMENT_PLACEHOLDER_PATTERN =
-  /\{argument\s+name=\\"([^"]+)\\"\s+default=\\"([^"]*)\\"[^}]*\}/g;
-
-const HOME_ARGUMENT_PLACEHOLDER_PATTERN =
-  /\{argument\s+name=(?:"([^"]+)"|'([^']+)')\s+default=(?:"([^"]*)"|'([^']*)')[^}]*\}/g;
 
 const HOME_PROMPT_EXAMPLES: Record<Locale, Record<string, string[]>> = {
   "en": {
@@ -3735,13 +3769,6 @@ function homeHeroChipPromptExamples(chipId: string, locale: Locale): string[] {
   return homeHeroChipPromptExamplesForLocale(chipId, locale);
 }
 
-type PromptLocaleKind = 'zh' | 'ja' | 'en';
-
-function promptLocaleKind(locale: Locale): PromptLocaleKind {
-  if (locale === 'zh-CN' || locale === 'zh-TW') return 'zh';
-  if (locale === 'ja') return 'ja';
-  return 'en';
-}
 
 function briefForChipId(chipId: string): Record<string, string> {
   switch (chipId) {

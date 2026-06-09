@@ -36,7 +36,8 @@ import { exactDateTime, messageTime, shortTime } from '../utils/chatTime';
 import { commentTargetDisplayName, commentsToAttachments, simplePositionLabel } from '../comments';
 import { AssistantMessage, type QuestionFormOpenRequest } from './AssistantMessage';
 import { AmrGuidance } from './AmrGuidance';
-import { AMR_RECHARGE_URL, resolveRunFailureUi } from '../runtime/amr-guidance';
+import { amrRechargeUrlForProfile, resolveRunFailureUi } from '../runtime/amr-guidance';
+import { RESUME_CONTINUE_PROMPT } from '../runtime/resume';
 import {
   ChatComposer,
   type ChatComposerHandle,
@@ -450,6 +451,7 @@ interface Props {
     meta?: ChatSendMeta,
   ) => void;
   onRetry?: (assistantMessage: ChatMessage) => void;
+  onResumeRun?: (assistantMessage: ChatMessage) => void;
   onStop: () => void;
   // Skills available for @-mention assembly. ProjectView filters out the
   // user's disabled set before passing them in here.
@@ -469,8 +471,8 @@ interface Props {
   // "Share to Open Design" button on each completed assistant message —
   // wired by ProjectView to handleSend with the bundled
   // `od-share-to-community` scenario's trigger prompt.
-  onShareToOpenDesign?: () => void;
-  shareToOpenDesignBusy?: boolean;
+  onShareToOpenDesign?: (assistantMessageId: string) => void;
+  shareToOpenDesignBusyMessageId?: string | null;
   forceStreamingMessageIds?: Set<string>;
   // Live-only streaming tool-input partials keyed by tool-use id. Threaded to
   // AssistantMessage so an in-flight Write/Edit can render its code in real
@@ -486,7 +488,7 @@ interface Props {
   onAssistantFeedback?: (assistantMessage: ChatMessage, change: ChatMessageFeedbackChange) => void;
   // "Next step" affordance handlers forwarded to the last assistant message.
   onArtifactShare?: (fileName: string) => void;
-  onArtifactChip?: (fileName: string, prompt: string) => void;
+  onArtifactChip?: (fileName: string | null, prompt: string) => void;
   onForkFromMessage?: (assistantMessage: ChatMessage) => void;
   forkingMessageId?: string | null;
   // Header "+" button — kicks off ProjectView's create-conversation flow.
@@ -589,7 +591,10 @@ interface Props {
   backLabel?: string;
   projectHeader?: ReactNode;
   designSystemPicker?: ReactNode;
+  config?: AppConfig;
 }
+
+const AMR_PROFILE_ENV_KEY = 'OPEN_DESIGN_AMR_PROFILE';
 
 type Tab = 'chat' | 'comments';
 
@@ -656,6 +661,7 @@ export function ChatPane({
   onDeleteComment,
   onSend,
   onRetry,
+  onResumeRun,
   onStop,
   onRemoveQueuedSend,
   onUpdateQueuedSend,
@@ -668,7 +674,7 @@ export function ChatPane({
   activePluginActionPaths,
   hiddenPluginActionPaths,
   onShareToOpenDesign,
-  shareToOpenDesignBusy,
+  shareToOpenDesignBusyMessageId,
   forceStreamingMessageIds,
   liveToolInput,
   initialDraft,
@@ -731,9 +737,11 @@ export function ChatPane({
   backLabel,
   projectHeader,
   designSystemPicker,
+  config,
 }: Props) {
   const t = useT();
   const analytics = useAnalytics();
+  const amrProfile = config?.agentCliEnv?.amr?.[AMR_PROFILE_ENV_KEY] ?? null;
   const logRef = useRef<HTMLDivElement | null>(null);
   const chatLogScrollIdleTimerRef = useRef<number | null>(null);
   const historyWrapRef = useRef<HTMLDivElement | null>(null);
@@ -859,6 +867,21 @@ export function ChatPane({
   const runFailureUi = retryAssistant
     ? resolveRunFailureUi(failedRunErrorEvent?.code, retryAssistant.agentId)
     : null;
+  // Offer Continue (resume) when the failed run is resumable AND the active
+  // agent still matches the agent that produced it. The daemon stores a
+  // resumable session per (conversation, agent); after an agent switch the new
+  // agent has no id for that session, so a resume would silently start fresh —
+  // fall back to the from-scratch Retry instead. We do NOT require `onResumeRun`
+  // here: because the daemon persists the resumable session, the plain Retry
+  // path (which re-sends the original prompt) would itself silently resume that
+  // session and double the work. So every ChatPane surface must offer Continue
+  // for a resumable failure — `onResumeRun` when wired (primary chat, carries
+  // the resume_continue analytics), otherwise a plain `onSend` of the canonical
+  // continue prompt (resumes the session without re-sending the original turn).
+  const canResumeFailedRun =
+    !!retryAssistant?.resumable &&
+    !!retryAssistant?.agentId &&
+    retryAssistant.agentId === config?.agentId;
   // Prefer a case-specific message (AMR auth / balance) over the raw upstream
   // string; fall back to the live global error (also covers conversation-load
   // / audio errors) then the persisted run error so a reload still shows it.
@@ -1937,7 +1960,7 @@ export function ChatPane({
                 activePluginActionPaths={activePluginActionPaths}
                 hiddenPluginActionPaths={hiddenPluginActionPaths}
                 onShareToOpenDesign={onShareToOpenDesign}
-                shareToOpenDesignBusy={shareToOpenDesignBusy}
+                shareToOpenDesignBusyMessageId={shareToOpenDesignBusyMessageId}
                 forceStreamingMessageIds={forceStreamingMessageIds}
                 lastAssistantId={lastAssistantId}
                 firstUserMessageId={firstUserMessageId}
@@ -2033,7 +2056,7 @@ export function ChatPane({
                                   'chat_error_recharge',
                                 );
                                 window.open(
-                                  attributedAmrUrl(AMR_RECHARGE_URL, attribution),
+                                  attributedAmrUrl(amrRechargeUrlForProfile(amrProfile), attribution),
                                   '_blank',
                                   'noopener,noreferrer',
                                 );
@@ -2042,7 +2065,26 @@ export function ChatPane({
                               {t('chat.amrError.rechargeCta')}
                             </button>
                           ) : null}
-                          {runFailureUi.primaryAction === 'retry' || runFailureUi.secondaryRetry ? (
+                          {canResumeFailedRun ? (
+                            // Resumable failure: continue the agent's existing
+                            // CLI session instead of restarting from scratch, so
+                            // partial work is kept. Replaces the from-scratch
+                            // Retry as the single primary recovery action. Use
+                            // the wired resume handler when present, otherwise a
+                            // plain send of the continue prompt — never the
+                            // re-sending Retry path, which would resume + repeat.
+                            <button
+                              type="button"
+                              className="ghost chat-error-retry"
+                              onClick={() =>
+                                onResumeRun
+                                  ? onResumeRun(retryAssistant)
+                                  : onSend(RESUME_CONTINUE_PROMPT, [], [])
+                              }
+                            >
+                              {t('chat.resumeRunCta')}
+                            </button>
+                          ) : runFailureUi.primaryAction === 'retry' || runFailureUi.secondaryRetry ? (
                             <button
                               type="button"
                               className="ghost chat-error-retry"
@@ -2157,9 +2199,9 @@ interface AssistantCallbacks {
     | ((message: ChatMessage, change: ChatMessageFeedbackChange) => void)
     | undefined;
   onArtifactShare: ((fileName: string) => void) | undefined;
-  onArtifactChip: ((fileName: string, prompt: string) => void) | undefined;
+  onArtifactChip: ((fileName: string | null, prompt: string) => void) | undefined;
   onForkFromMessage: ((message: ChatMessage) => void) | undefined;
-  onShareToOpenDesign: (() => void) | undefined;
+  onShareToOpenDesign: ((assistantMessageId: string) => void) | undefined;
 }
 
 type ChatRenderItem = {
@@ -2203,7 +2245,7 @@ function ChatRows({
   activePluginActionPaths,
   hiddenPluginActionPaths,
   onShareToOpenDesign,
-  shareToOpenDesignBusy,
+  shareToOpenDesignBusyMessageId,
   forceStreamingMessageIds,
   lastAssistantId,
   firstUserMessageId,
@@ -2239,8 +2281,8 @@ function ChatRows({
   onRequestPluginFolderAgentAction?: (relativePath: string, action: PluginFolderAgentAction) => void;
   activePluginActionPaths?: Set<string>;
   hiddenPluginActionPaths?: Set<string>;
-  onShareToOpenDesign?: () => void;
-  shareToOpenDesignBusy?: boolean;
+  onShareToOpenDesign?: (assistantMessageId: string) => void;
+  shareToOpenDesignBusyMessageId?: string | null;
   forceStreamingMessageIds?: Set<string>;
   lastAssistantId: string | undefined;
   firstUserMessageId: string | undefined;
@@ -2252,7 +2294,7 @@ function ChatRows({
   assistantCallbacksRef: MutableRefObject<AssistantCallbacks>;
   onContinueRemainingTasks?: (assistantMessage: ChatMessage, todos: TodoItem[]) => void;
   onArtifactShare?: (fileName: string) => void;
-  onArtifactChip?: (fileName: string, prompt: string) => void;
+  onArtifactChip?: (fileName: string | null, prompt: string) => void;
   onForkFromMessage?: (message: ChatMessage) => void;
   onAssistantFeedback?: (message: ChatMessage, change: ChatMessageFeedbackChange) => void;
   forkingMessageId?: string | null;
@@ -2322,10 +2364,10 @@ function ChatRows({
         hiddenPluginActionPaths={hiddenPluginActionPaths}
         onShareToOpenDesign={
           onShareToOpenDesign
-            ? () => assistantCallbacksRef.current.onShareToOpenDesign?.()
+            ? () => assistantCallbacksRef.current.onShareToOpenDesign?.(m.id)
             : undefined
         }
-        shareToOpenDesignBusy={shareToOpenDesignBusy}
+        shareToOpenDesignBusy={shareToOpenDesignBusyMessageId === m.id}
         isLast={m.id === lastAssistantId}
         errorCardOwnerId={errorCardOwnerId}
         nextUserContent={nextUserContentByAssistantId.get(m.id)}
@@ -2811,6 +2853,7 @@ function QueuedSendStrip({
                   data-tooltip={t('chat.send')}
                   data-tooltip-placement="top"
                   aria-label={t('chat.send')}
+                  data-testid="chat-queued-send-now"
                   onClick={() => onSendNow?.(item.id)}
                   disabled={!onSendNow}
                 >
