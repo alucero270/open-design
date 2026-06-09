@@ -267,6 +267,43 @@ describe('same-run retry runtime', () => {
     expect(events.filter((event) => event.event === 'repo_changes')).toHaveLength(1);
     expect(events.filter((event) => event.event === 'end')).toHaveLength(1);
   });
+
+  it('does not persist a stale probe-only repo warning after a clean retry', async () => {
+    binDir = await mkdtemp(path.join(os.tmpdir(), 'od-run-retry-linked-probe-bin-'));
+    const linkedRepo = path.join(binDir, 'linked-repo');
+    await initLinkedRepo(linkedRepo);
+    const { bin: fakeClaude } = await writeStallingWithTransientRepoProbeFailureClaude(
+      binDir,
+      'claude-stall-transient-probe',
+      linkedRepo,
+    );
+
+    delete process.env.POSTHOG_KEY;
+    delete process.env.POSTHOG_HOST;
+    delete process.env.LANGFUSE_PUBLIC_KEY;
+    delete process.env.LANGFUSE_SECRET_KEY;
+    delete process.env.LANGFUSE_BASE_URL;
+    delete process.env.OPEN_DESIGN_TELEMETRY_RELAY_URL;
+    process.env.OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS = '400';
+
+    started = await startServer({ port: 0, returnServer: true }) as StartedServer;
+    await putConfig(started.url, {
+      agentId: 'claude',
+      agentCliEnv: { claude: { CLAUDE_BIN: fakeClaude } },
+      telemetry: { metrics: true, content: false, artifactManifest: false },
+      privacyDecisionAt: Date.now(),
+    });
+
+    const run = await createAndWaitForRun(started.url, { linkedDirs: [linkedRepo] });
+    expect(run.status).toBe('succeeded');
+    expect(run.repoChanges).toBeNull();
+
+    const events = await readRunEvents(run.eventsLogPath);
+    expect(events.filter((event) => event.event === 'start')).toHaveLength(2);
+    expect(events.filter((event) => event.event === 'run_retry_attempted')).toHaveLength(1);
+    expect(events.filter((event) => event.event === 'repo_changes')).toHaveLength(0);
+    expect(events.filter((event) => event.event === 'end')).toHaveLength(1);
+  });
 });
 
 function snapshotEnv(): Record<string, string | undefined> {
@@ -414,6 +451,72 @@ if (attempts === 0) {
     message: {
       id: 'msg-retry-linked-recapture-success',
       content: [{ type: 'text', text: 'Recovered and edited linked repo after retry.' }],
+      stop_reason: 'end_turn'
+    }
+  }));
+  setTimeout(() => process.exit(0), 20);
+}
+`, 'utf8');
+  await chmod(bin, 0o755);
+  return { bin, argsLogPath };
+}
+
+async function writeStallingWithTransientRepoProbeFailureClaude(
+  dir: string,
+  name: string,
+  linkedRepoPath: string,
+): Promise<{ bin: string; argsLogPath: string }> {
+  const bin = path.join(dir, name);
+  const counterPath = path.join(dir, `${name}-attempts`);
+  const argsLogPath = path.join(dir, `${name}-args.jsonl`);
+  await writeFile(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const counterPath = ${JSON.stringify(counterPath)};
+const argsLogPath = ${JSON.stringify(argsLogPath)};
+const linkedRepoPath = ${JSON.stringify(linkedRepoPath)};
+const dotGitPath = path.join(linkedRepoPath, '.git');
+const hiddenGitPath = path.join(linkedRepoPath, '.git-hidden-for-probe');
+function hideGit() {
+  if (fs.existsSync(dotGitPath) && !fs.existsSync(hiddenGitPath)) {
+    fs.renameSync(dotGitPath, hiddenGitPath);
+  }
+}
+function restoreGit() {
+  if (fs.existsSync(hiddenGitPath) && !fs.existsSync(dotGitPath)) {
+    fs.renameSync(hiddenGitPath, dotGitPath);
+  }
+}
+if (process.argv.includes('--version')) {
+  console.log('claude-code 1.0.0-retry-transient-probe');
+  process.exit(0);
+}
+if (process.argv.includes('--help')) {
+  console.log('Usage: claude -p [--include-partial-messages] [--add-dir DIR]');
+  process.exit(0);
+}
+let attempts = 0;
+try { attempts = Number(fs.readFileSync(counterPath, 'utf8')) || 0; } catch {}
+fs.writeFileSync(counterPath, String(attempts + 1));
+fs.appendFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)) + '\\n');
+if (attempts === 0) {
+  hideGit();
+  process.on('SIGTERM', () => {
+    restoreGit();
+    process.exit(143);
+  });
+  setTimeout(() => {
+    restoreGit();
+    process.exit(0);
+  }, 60000);
+} else {
+  restoreGit();
+  console.log(JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-retry-test' }));
+  console.log(JSON.stringify({
+    type: 'assistant',
+    message: {
+      id: 'msg-retry-transient-probe-success',
+      content: [{ type: 'text', text: 'Recovered after transient repo probe failure.' }],
       stop_reason: 'end_turn'
     }
   }));
