@@ -1,6 +1,7 @@
 ﻿import { describe, expect, it } from 'vitest';
 
 import {
+  captureLinkedRepoChangeSummary,
   captureLinkedRepoSnapshot,
   summarizeLinkedRepoChanges,
   type LinkedRepoSnapshot,
@@ -196,6 +197,51 @@ describe('linked repo change summaries', () => {
       status: 'clean',
       headSha: 'def5678',
       headChanged: true,
+    });
+  });
+
+  it('captures changed paths and diff stat for clean committed output', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') {
+        return { stdout: phase === 'before' ? 'abc1234\n' : 'def5678\n', stderr: '' };
+      }
+      if (command === 'status --short --untracked-files=all') return { stdout: '', stderr: '' };
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (command === 'diff --name-status -z abc1234..def5678 --') {
+        return { stdout: 'A\0committed-output.ts\0', stderr: '' };
+      }
+      if (command === 'diff --stat abc1234..def5678 --') {
+        return {
+          stdout: ' committed-output.ts | 1 +\n 1 file changed, 1 insertion(+)\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const summary = await captureLinkedRepoChangeSummary(before, { runGit });
+
+    expect(summary).toMatchObject({
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      preexistingChangeCount: 0,
+      refChangeCount: 1,
+      hasChanges: true,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      status: 'clean',
+      headSha: 'def5678',
+      headChanged: true,
+      changedFileCount: 1,
+      newStatusLineCount: 1,
+      statusLines: ['A  committed-output.ts'],
+      diffStat: 'committed-output.ts | 1 +\n 1 file changed, 1 insertion(+)',
     });
   });
 

@@ -971,20 +971,32 @@ process.stdin.on('end', () => {
           repoChanges?: {
             hasChanges: boolean;
             changedFileCount: number;
+            newStatusLineCount: number;
             refChangeCount?: number;
-            linkedDirs: Array<{ status: string; headChanged?: boolean; statusLines: string[] }>;
+            linkedDirs: Array<{
+              status: string;
+              headChanged?: boolean;
+              changedFileCount: number;
+              newStatusLineCount: number;
+              statusLines: string[];
+              diffStat?: string | null;
+            }>;
           };
         };
         expect(statusBody.status).toBe('succeeded');
         expect(statusBody.repoChanges).toMatchObject({
           hasChanges: true,
-          changedFileCount: 0,
+          changedFileCount: 1,
+          newStatusLineCount: 1,
           refChangeCount: 1,
           linkedDirs: [
             expect.objectContaining({
               status: 'clean',
               headChanged: true,
-              statusLines: [],
+              changedFileCount: 1,
+              newStatusLineCount: 1,
+              statusLines: ['A  committed-output.ts'],
+              diffStat: expect.stringContaining('committed-output.ts'),
             }),
           ],
         });

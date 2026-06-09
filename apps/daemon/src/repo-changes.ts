@@ -68,10 +68,19 @@ export async function captureLinkedRepoChangeSummary(
   before: LinkedRepoSnapshot,
   options: CaptureLinkedRepoSnapshotOptions = {},
 ): Promise<LinkedRepoChangeSummary> {
+  const runGit = options.runGit ?? defaultRunGit;
+  const maxStatusLines = options.maxStatusLines ?? DEFAULT_MAX_STATUS_LINES;
+  const maxDiffStatChars = options.maxDiffStatChars ?? DEFAULT_MAX_DIFF_STAT_CHARS;
   const after = await captureLinkedRepoSnapshot(
     before.linkedDirs.map((dir) => dir.path),
-    options,
+    {
+      ...options,
+      runGit,
+      maxStatusLines,
+      maxDiffStatChars,
+    },
   );
+  await captureCleanHeadRangeChanges(before, after, runGit, maxStatusLines, maxDiffStatChars);
   return summarizeLinkedRepoChanges(before, after);
 }
 
@@ -190,6 +199,94 @@ async function captureLinkedRepoDir(
   } catch (err) {
     return emptySnapshotDir(dir, 'error', errorMessage(err));
   }
+}
+
+async function captureCleanHeadRangeChanges(
+  before: LinkedRepoSnapshot,
+  after: LinkedRepoSnapshot,
+  runGit: RunGit,
+  maxStatusLines: number,
+  maxDiffStatChars: number,
+): Promise<void> {
+  const beforeByPath = new Map(before.linkedDirs.map((dir) => [dir.path, dir]));
+  await Promise.all(
+    after.linkedDirs.map(async (dir) => {
+      const baseline = beforeByPath.get(dir.path);
+      if (!shouldCaptureCleanHeadRange(baseline, dir)) return;
+      const range = `${baseline.headSha}..${dir.headSha}`;
+      try {
+        const [nameStatus, diffStat] = await Promise.all([
+          runGit(dir.path, ['diff', '--name-status', '-z', range, '--']),
+          runGit(dir.path, ['diff', '--stat', range, '--']).catch(() => ({ stdout: '', stderr: '' })),
+        ]);
+        const entries = parseDiffNameStatusZ(nameStatus.stdout);
+        if (entries.length === 0) return;
+        const allStatusLines = entries.map((entry) => entry.displayLine);
+        const rawDiffStat = diffStat.stdout.trim();
+        const diffStatTruncated = rawDiffStat.length > maxDiffStatChars;
+        dir.statusLines = allStatusLines.slice(0, maxStatusLines);
+        dir.statusPathSets = entries.map((entry) => entry.paths);
+        dir.statusFingerprints = entries.map((entry) =>
+          `${entry.paths.join('\0')}\0commit-range:${range}\0status:${entry.statusBits}`,
+        );
+        dir.statusLineCount = entries.length;
+        if (entries.length > dir.statusLines.length) dir.statusTruncated = true;
+        dir.diffStat = rawDiffStat
+          ? rawDiffStat.slice(0, maxDiffStatChars)
+          : dir.diffStat;
+        if (diffStatTruncated) dir.diffStatTruncated = true;
+      } catch {
+        // Keep the ref-update summary when the optional range probe fails.
+      }
+    }),
+  );
+}
+
+function shouldCaptureCleanHeadRange(
+  baseline: LinkedRepoSnapshotDir | undefined,
+  dir: LinkedRepoSnapshotDir,
+): baseline is LinkedRepoSnapshotDir {
+  if (!baseline) return false;
+  if (dir.status !== 'clean' || dir.statusLineCount !== 0) return false;
+  if (baseline.status === 'error' || baseline.status === 'not_git') return false;
+  if (!baseline.headSha || !dir.headSha) return false;
+  return baseline.headSha !== dir.headSha;
+}
+
+interface DiffNameStatusEntry {
+  displayLine: string;
+  paths: string[];
+  statusBits: string;
+}
+
+function parseDiffNameStatusZ(value: string): DiffNameStatusEntry[] {
+  const fields = value.split('\0').filter((field) => field.length > 0);
+  const entries: DiffNameStatusEntry[] = [];
+  let index = 0;
+  while (index < fields.length) {
+    const status = fields[index++] ?? '';
+    const kind = status[0] ?? 'M';
+    if ((kind === 'R' || kind === 'C') && index + 1 < fields.length) {
+      const oldPath = fields[index++] ?? '';
+      const newPath = fields[index++] ?? '';
+      if (oldPath && newPath) {
+        entries.push({
+          displayLine: `${kind}  ${oldPath} -> ${newPath}`,
+          paths: [oldPath, newPath],
+          statusBits: `${kind} `,
+        });
+      }
+      continue;
+    }
+    const path = fields[index++] ?? '';
+    if (!path) continue;
+    entries.push({
+      displayLine: `${kind}  ${path}`,
+      paths: [path],
+      statusBits: `${kind} `,
+    });
+  }
+  return entries;
 }
 
 function emptySnapshotDir(
