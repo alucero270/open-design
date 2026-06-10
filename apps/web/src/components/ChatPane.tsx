@@ -15,9 +15,15 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useAnalytics } from '../analytics/provider';
-import { trackChatPanelClick, trackRunFailedToastSurfaceView } from '../analytics/events';
+import { trackChatPanelClick, trackMessageQueueClick, trackRunFailedToastSurfaceView } from '../analytics/events';
 import { attributedAmrUrl, recordAmrEntry } from '../analytics/amr-attribution';
 import { useT } from '../i18n';
+import {
+  FEATURED_DESIGN_TOOLBOX_ACTION_IDS,
+  findDesignToolboxSkill,
+  getDesignToolboxAction,
+  type DesignToolboxActionId,
+} from '../runtime/design-toolbox';
 import type { Dict } from '../i18n/types';
 import { copyToClipboard } from '../lib/copy-to-clipboard';
 import { projectRawUrl } from '../providers/registry';
@@ -29,8 +35,7 @@ import {
   DESIGN_SYSTEM_WORKSPACE_DISPLAY_TITLE,
   isDesignSystemWorkspacePrompt,
 } from '../design-system-auto-prompt';
-import { latestTodoWriteInputForPinnedCard } from '../runtime/todos';
-import { TodoCard } from './ToolCard';
+import { isTodoWriteToolName, latestTodoWriteInputForPinnedCard } from '../runtime/todos';
 import type { AppConfig, ChatAttachment, ChatCommentAttachment, ChatMessage, ChatMessageFeedbackChange, Conversation, DesignSystemSummary, PreviewComment, Project, ProjectFile, ProjectMetadata, SkillSummary } from '../types';
 import { exactDateTime, messageTime, shortTime } from '../utils/chatTime';
 import { commentTargetDisplayName, commentsToAttachments, simplePositionLabel } from '../comments';
@@ -487,8 +492,10 @@ interface Props {
   onContinueRemainingTasks?: (assistantMessage: ChatMessage, todos: TodoItem[]) => void;
   onAssistantFeedback?: (assistantMessage: ChatMessage, change: ChatMessageFeedbackChange) => void;
   // "Next step" affordance handlers forwarded to the last assistant message.
+  // The featured design-toolbox rows are driven directly off the composer ref
+  // owned here, so they need no handler from ProjectView (unlike onArtifactShare).
   onArtifactShare?: (fileName: string) => void;
-  onArtifactChip?: (fileName: string | null, prompt: string) => void;
+  onArtifactDownload?: (fileName: string) => void;
   onForkFromMessage?: (assistantMessage: ChatMessage) => void;
   forkingMessageId?: string | null;
   // Header "+" button — kicks off ProjectView's create-conversation flow.
@@ -683,7 +690,7 @@ export function ChatPane({
   onContinueRemainingTasks,
   onAssistantFeedback,
   onArtifactShare,
-  onArtifactChip,
+  onArtifactDownload,
   onForkFromMessage,
   forkingMessageId = null,
   onNewConversation,
@@ -748,7 +755,6 @@ export function ChatPane({
   const composerRef = useRef<ChatComposerHandle | null>(null);
   const composerSlotRef = useRef<HTMLDivElement | null>(null);
   const composerLayerRef = useRef<HTMLDivElement | null>(null);
-  const pinnedTodoRef = useRef<HTMLDivElement | null>(null);
   const queuedSendStripRef = useRef<HTMLDivElement | null>(null);
   const didInitialScrollRef = useRef(false);
   const runFailedToastSurfaceKeysRef = useRef<Set<string>>(new Set());
@@ -783,7 +789,6 @@ export function ChatPane({
     onContinueRemainingTasks,
     onAssistantFeedback,
     onArtifactShare,
-    onArtifactChip,
     onForkFromMessage,
     onShareToOpenDesign,
   });
@@ -792,10 +797,30 @@ export function ChatPane({
     onContinueRemainingTasks,
     onAssistantFeedback,
     onArtifactShare,
-    onArtifactChip,
     onForkFromMessage,
     onShareToOpenDesign,
   };
+  // Featured design-toolbox follow-up rows on the assistant "next step" card.
+  // The toolbox left the "+" menu, so these route straight into the composer
+  // we own here: seeding an action's prompt+skill, or opening the full panel.
+  // Both stay stable (composer ref + no deps) so AssistantMessage stays memoized.
+  const handleToolboxAction = useCallback((id: DesignToolboxActionId) => {
+    composerRef.current?.applyDesignToolboxAction(id);
+  }, []);
+  const handlePickSkill = useCallback((skillId: string) => {
+    composerRef.current?.applyDesignToolboxSkill(skillId);
+  }, []);
+  // The `@skill` shown in each featured row's hover detail — matched the same
+  // way the composer matches it, using the raw skill name (what gets inlined
+  // into the draft). Recomputed only when the skill list changes.
+  const featuredToolboxSkillNames = useMemo<Partial<Record<DesignToolboxActionId, string | null>>>(() => {
+    const map: Partial<Record<DesignToolboxActionId, string | null>> = {};
+    for (const id of FEATURED_DESIGN_TOOLBOX_ACTION_IDS) {
+      const action = getDesignToolboxAction(id);
+      map[id] = action ? (findDesignToolboxSkill(action, skills)?.name ?? null) : null;
+    }
+    return map;
+  }, [skills]);
   const [tab, setTab] = useState<Tab>('chat');
   const [showConvList, setShowConvList] = useState(false);
   const [conversationSearch, setConversationSearch] = useState('');
@@ -810,34 +835,6 @@ export function ChatPane({
     bottom: number;
   } | null>(null);
   const [composerSlotHeight, setComposerSlotHeight] = useState(0);
-  // The user can dismiss the pinned task list once everything is complete.
-  // We key the dismissal on the snapshot (serialized TodoWrite input) so
-  // the next time the agent emits a different snapshot the card returns,
-  // but the same snapshot stays hidden across renders / streaming ticks.
-  // Persisted to sessionStorage so the dismissal survives tab switches and
-  // component remounts (the ChatPane key includes conversationId, so switching
-  // conversations unmounts and remounts the component). The stored value is the
-  // snapshot key, so a fresh TodoWrite snapshot still re-shows the card.
-  const dismissedStorageKey = `dismissedTodo:${activeConversationId ?? 'none'}`;
-  const [dismissedPinnedTodoKey, setDismissedPinnedTodoKey] = useState<string | null>(() => {
-    try {
-      return sessionStorage.getItem(dismissedStorageKey);
-    } catch {
-      return null;
-    }
-  });
-  // Sync dismissed state when conversationId changes (e.g., tab switching).
-  // The parent key includes conversationId so unmount/remount resets this,
-  // but if conversationId changes without unmounting or the storage key
-  // changes, re-read to keep the dismissed state in sync.
-  useEffect(() => {
-    try {
-      const stored = sessionStorage.getItem(dismissedStorageKey);
-      setDismissedPinnedTodoKey(stored);
-    } catch {
-      // sessionStorage access can fail in private browsing
-    }
-  }, [dismissedStorageKey]);
   const [editingQueuedSendId, setEditingQueuedSendId] = useState<string | null>(null);
   // Reverse scan (no array copy) + memo so this and the maps below don't
   // recompute on every non-`messages` render (scroll, hover, toggles).
@@ -1375,24 +1372,7 @@ export function ChatPane({
       }
     };
 
-    // The PinnedTodoSlot renders outside the scroll container. When the todo
-    // card grows, the chat-log's clientHeight shrinks (flex layout) and the
-    // user drifts away from the bottom. Observe the pinned-todo div so
-    // followLatestIfPinned fires whenever the card changes height.
-    let observedPinnedTodo: Element | null = null;
     let observedQueuedSendStrip: Element | null = null;
-    const syncPinnedTodo = () => {
-      if (!resizeObserver) return;
-      const pinnedEl = pinnedTodoRef.current;
-      if (pinnedEl && observedPinnedTodo !== pinnedEl) {
-        if (observedPinnedTodo) resizeObserver.unobserve(observedPinnedTodo);
-        resizeObserver.observe(pinnedEl);
-        observedPinnedTodo = pinnedEl;
-      } else if (!pinnedEl && observedPinnedTodo) {
-        resizeObserver.unobserve(observedPinnedTodo);
-        observedPinnedTodo = null;
-      }
-    };
     const syncQueuedSendStrip = () => {
       if (!resizeObserver) return;
       const queuedEl = queuedSendStripRef.current;
@@ -1409,14 +1389,12 @@ export function ChatPane({
     };
 
     syncObservedChildren();
-    syncPinnedTodo();
     syncQueuedSendStrip();
 
     const mutationObserver =
       typeof MutationObserver !== 'undefined'
         ? new MutationObserver(() => {
             syncObservedChildren();
-            syncPinnedTodo();
             syncQueuedSendStrip();
             followLatestIfPinned();
           })
@@ -1429,11 +1407,11 @@ export function ChatPane({
       childList: true,
       subtree: true,
     });
-    // PinnedTodoSlot and QueuedSendStrip live outside the chat-log subtree
-    // (they are siblings of .chat-log-wrap inside .pane). The
-    // MutationObserver above only fires for changes inside el, so it cannot
-    // detect those surfaces mounting or unmounting. Watch the nearest common
-    // ancestor (.pane) with childList-only to keep their observers current.
+    // QueuedSendStrip lives outside the chat-log subtree (it is a sibling of
+    // .chat-log-wrap inside .pane). The MutationObserver above only fires for
+    // changes inside el, so it cannot detect that surface mounting or
+    // unmounting. Watch the nearest common ancestor (.pane) with childList-only
+    // to keep its observer current.
     const paneEl = el.parentElement?.parentElement ?? null;
     if (paneEl && mutationObserver) {
       mutationObserver.observe(paneEl, { childList: true });
@@ -1972,7 +1950,11 @@ export function ChatPane({
                 assistantCallbacksRef={assistantCallbacksRef}
                 onContinueRemainingTasks={onContinueRemainingTasks}
                 onArtifactShare={onArtifactShare}
-                onArtifactChip={onArtifactChip}
+                onToolboxAction={handleToolboxAction}
+                onPickSkill={handlePickSkill}
+                onArtifactDownload={onArtifactDownload}
+                nextStepSkills={skills}
+                toolboxSkillNames={featuredToolboxSkillNames}
                 onForkFromMessage={onForkFromMessage}
                 onAssistantFeedback={onAssistantFeedback}
                 forkingMessageId={forkingMessageId}
@@ -2133,32 +2115,45 @@ export function ChatPane({
               <span>{t('chat.jumpToLatest')}</span>
             </button>
           </div>
-          <PinnedTodoSlot
-            messages={messages}
-            streaming={streaming}
-            dismissedKey={dismissedPinnedTodoKey}
-            onDismiss={(key) => {
-              setDismissedPinnedTodoKey(key);
-              try {
-                if (key) {
-                  sessionStorage.setItem(dismissedStorageKey, key);
-                } else {
-                  sessionStorage.removeItem(dismissedStorageKey);
-                }
-              } catch {
-                // sessionStorage access can fail in private browsing / sandboxed contexts
-              }
-            }}
-            containerRef={pinnedTodoRef}
-          />
           <QueuedSendStrip
             containerRef={queuedSendStripRef}
             items={queuedItems}
             editingId={editingQueuedSendId}
-            onEdit={restoreQueuedSendToComposer}
-            onRemove={onRemoveQueuedSend}
+            onEdit={(item) => {
+              trackMessageQueueClick(analytics.track, {
+                page_name: 'chat_panel',
+                area: 'message_queue',
+                element: 'edit',
+                project_id: projectId ?? '',
+                queue_length: queuedItems.length,
+              });
+              restoreQueuedSendToComposer(item);
+            }}
+            onRemove={onRemoveQueuedSend
+              ? (id) => {
+                  trackMessageQueueClick(analytics.track, {
+                    page_name: 'chat_panel',
+                    area: 'message_queue',
+                    element: 'delete',
+                    project_id: projectId ?? '',
+                    queue_length: queuedItems.length,
+                  });
+                  onRemoveQueuedSend(id);
+                }
+              : undefined}
             onReorder={onReorderQueuedSends}
-            onSendNow={onSendQueuedNow}
+            onSendNow={onSendQueuedNow
+              ? (id) => {
+                  trackMessageQueueClick(analytics.track, {
+                    page_name: 'chat_panel',
+                    area: 'message_queue',
+                    element: 'send_now',
+                    project_id: projectId ?? '',
+                    queue_length: queuedItems.length,
+                  });
+                  onSendQueuedNow(id);
+                }
+              : undefined}
           />
           <div
             className="chat-composer-slot"
@@ -2199,7 +2194,6 @@ interface AssistantCallbacks {
     | ((message: ChatMessage, change: ChatMessageFeedbackChange) => void)
     | undefined;
   onArtifactShare: ((fileName: string) => void) | undefined;
-  onArtifactChip: ((fileName: string | null, prompt: string) => void) | undefined;
   onForkFromMessage: ((message: ChatMessage) => void) | undefined;
   onShareToOpenDesign: ((assistantMessageId: string) => void) | undefined;
 }
@@ -2257,7 +2251,11 @@ function ChatRows({
   assistantCallbacksRef,
   onContinueRemainingTasks,
   onArtifactShare,
-  onArtifactChip,
+  onToolboxAction,
+  onPickSkill,
+  onArtifactDownload,
+  nextStepSkills,
+  toolboxSkillNames,
   onForkFromMessage,
   onAssistantFeedback,
   forkingMessageId,
@@ -2294,7 +2292,11 @@ function ChatRows({
   assistantCallbacksRef: MutableRefObject<AssistantCallbacks>;
   onContinueRemainingTasks?: (assistantMessage: ChatMessage, todos: TodoItem[]) => void;
   onArtifactShare?: (fileName: string) => void;
-  onArtifactChip?: (fileName: string | null, prompt: string) => void;
+  onToolboxAction?: (id: DesignToolboxActionId) => void;
+  onPickSkill?: (skillId: string) => void;
+  onArtifactDownload?: (fileName: string) => void;
+  nextStepSkills?: SkillSummary[];
+  toolboxSkillNames?: Partial<Record<DesignToolboxActionId, string | null>>;
   onForkFromMessage?: (message: ChatMessage) => void;
   onAssistantFeedback?: (message: ChatMessage, change: ChatMessageFeedbackChange) => void;
   forkingMessageId?: string | null;
@@ -2303,7 +2305,18 @@ function ChatRows({
   onOpenQuestions?: (request?: QuestionFormOpenRequest) => void;
   scrollContainerRef: MutableRefObject<HTMLDivElement | null>;
 }) {
-  const items = useMemo(() => buildChatRenderItems(messages), [messages]);
+  const conversationTodoInput = useMemo(
+    () => latestTodoWriteInputForPinnedCard(messages),
+    [messages],
+  );
+  const conversationTodoAnchorMessageId = useMemo(
+    () => firstTodoWriteAssistantMessageId(messages),
+    [messages],
+  );
+  const items = useMemo(
+    () => buildChatRenderItems(messages),
+    [messages],
+  );
   const virtualized = items.length > CHAT_MESSAGE_VIRTUALIZE_THRESHOLD;
   const virtualWindow = useMeasuredVirtualWindow(items, {
     enabled: virtualized,
@@ -2312,6 +2325,10 @@ function ChatRows({
     overscanPx: CHAT_MESSAGE_OVERSCAN_PX,
     resetKey: activeConversationKey,
     initialTailRows: CHAT_VIRTUAL_INITIAL_TAIL_ROWS,
+    alwaysIncludeKey:
+      conversationTodoInput != null && conversationTodoAnchorMessageId
+        ? `message:${conversationTodoAnchorMessageId}`
+        : undefined,
   });
 
   const renderItem = (item: ChatRenderItem) => {
@@ -2353,6 +2370,8 @@ function ChatRows({
         // get a stable `undefined`, so adding `liveToolInput` to the memo
         // comparator re-renders just this row per `tool_input_delta`, not all N.
         liveToolInput={messageStreaming ? liveToolInput : undefined}
+        showConversationTodoCard={m.id === conversationTodoAnchorMessageId}
+        conversationTodoInput={conversationTodoInput}
         projectId={projectId}
         projectKind={projectKindForTracking}
         conversationId={activeConversationId}
@@ -2399,11 +2418,11 @@ function ChatRows({
             ? (fileName) => assistantCallbacksRef.current.onArtifactShare?.(fileName)
             : undefined
         }
-        onArtifactChip={
-          onArtifactChip
-            ? (fileName, prompt) => assistantCallbacksRef.current.onArtifactChip?.(fileName, prompt)
-            : undefined
-        }
+        onToolboxAction={onToolboxAction}
+        onPickSkill={onPickSkill}
+        onArtifactDownload={onArtifactDownload}
+        nextStepSkills={nextStepSkills}
+        toolboxSkillNames={toolboxSkillNames}
       />
     );
   };
@@ -2491,6 +2510,17 @@ function buildChatRenderItems(messages: ChatMessage[]): ChatRenderItem[] {
   return items;
 }
 
+function firstTodoWriteAssistantMessageId(messages: ChatMessage[]): string | null {
+  const message = messages.find(
+    (candidate) =>
+      candidate.role === 'assistant' &&
+      candidate.events?.some(
+        (event) => event.kind === 'tool_use' && isTodoWriteToolName(event.name),
+      ),
+  );
+  return message?.id ?? null;
+}
+
 function estimateChatRenderItemHeight(item: ChatRenderItem): number {
   const message = item.message;
   const contentLength = message.content?.length ?? 0;
@@ -2518,6 +2548,7 @@ function useMeasuredVirtualWindow<T extends { key: string }>(
     overscanPx,
     resetKey,
     initialTailRows,
+    alwaysIncludeKey,
   }: {
     enabled: boolean;
     containerRef: MutableRefObject<HTMLDivElement | null>;
@@ -2525,6 +2556,7 @@ function useMeasuredVirtualWindow<T extends { key: string }>(
     overscanPx: number;
     resetKey: string;
     initialTailRows: number;
+    alwaysIncludeKey?: string;
   },
 ) {
   const measuredHeightsRef = useRef<Map<string, number>>(new Map());
@@ -2594,10 +2626,11 @@ function useMeasuredVirtualWindow<T extends { key: string }>(
     const height = viewport.height || CHAT_VIRTUAL_DEFAULT_VIEWPORT_PX;
     if (viewport.scrollTop === 0 && viewport.height === 0) {
       const start = Math.max(0, items.length - initialTailRows);
-      return items.slice(start).map((item, offset) => {
+      const rows = items.slice(start).map((item, offset) => {
         const index = start + offset;
         return { item, index, top: layout.offsets[index] ?? 0 };
       });
+      return includeVirtualRowByKey(rows, items, layout.offsets, alwaysIncludeKey);
     }
     const startTarget = Math.max(0, viewport.scrollTop - overscanPx);
     const endTarget = viewport.scrollTop + height + overscanPx;
@@ -2612,11 +2645,13 @@ function useMeasuredVirtualWindow<T extends { key: string }>(
     while (end < items.length && (layout.offsets[end] ?? 0) <= endTarget) {
       end += 1;
     }
-    return items.slice(start, end).map((item, offset) => {
+    const rows = items.slice(start, end).map((item, offset) => {
       const index = start + offset;
       return { item, index, top: layout.offsets[index] ?? 0 };
     });
+    return includeVirtualRowByKey(rows, items, layout.offsets, alwaysIncludeKey);
   }, [
+    alwaysIncludeKey,
     enabled,
     initialTailRows,
     items,
@@ -2643,55 +2678,23 @@ function useMeasuredVirtualWindow<T extends { key: string }>(
   };
 }
 
-// Pinned task list above the chat composer. The latest TodoWrite snapshot
-// across the entire conversation is the canonical state; AssistantMessage
-// no longer renders these inline so there is exactly one TodoCard on
-// screen. When every task is complete the user can dismiss the card; the
-// dismissal sticks to the current snapshot only, so a fresh TodoWrite
-// from the agent re-shows it.
-function PinnedTodoSlot({
-  messages,
-  streaming,
-  dismissedKey,
-  onDismiss,
-  containerRef,
-}: {
-  messages: ChatMessage[];
-  streaming: boolean;
-  dismissedKey: string | null;
-  onDismiss: (key: string | null) => void;
-  containerRef?: MutableRefObject<HTMLDivElement | null>;
-}) {
-  // `exiting` lets the dismiss click play a slide-down transition before
-  // the slot tears down. Without it React would unmount immediately and
-  // the card would pop out without animation.
-  const [exiting, setExiting] = useState(false);
-  const input = latestTodoWriteInputForPinnedCard(messages);
-  if (input == null) return null;
-  let snapshotKey: string;
-  try {
-    snapshotKey = JSON.stringify(input);
-  } catch {
-    snapshotKey = String(input);
-  }
-  if (snapshotKey === dismissedKey) return null;
-  return (
-    <div className={`chat-pinned-todo${exiting ? ' chat-pinned-todo-exit' : ''}`} ref={containerRef}>
-      <TodoCard
-        input={input}
-        runStreaming={streaming}
-        runSucceeded={!streaming}
-        onDismiss={() => {
-          if (exiting) return;
-          setExiting(true);
-          // Match the slide-out duration in CSS (220ms) — once the
-          // transition completes the snapshot key is recorded as
-          // dismissed and the slot is unmounted by the early return.
-          window.setTimeout(() => onDismiss(snapshotKey), 220);
-        }}
-      />
-    </div>
-  );
+function includeVirtualRowByKey<T extends { key: string }>(
+  rows: Array<{ item: T; index: number; top: number }>,
+  items: T[],
+  offsets: number[],
+  key: string | undefined,
+): Array<{ item: T; index: number; top: number }> {
+  if (!key || rows.some((row) => row.item.key === key)) return rows;
+  const index = items.findIndex((item) => item.key === key);
+  if (index === -1) return rows;
+  return [
+    ...rows,
+    {
+      item: items[index]!,
+      index,
+      top: offsets[index] ?? 0,
+    },
+  ].sort((a, b) => a.index - b.index);
 }
 
 function QueuedSendStrip({
