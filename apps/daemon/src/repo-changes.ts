@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 import type {
   LinkedRepoChangeDirectorySummary,
@@ -9,6 +9,7 @@ import type {
 const DEFAULT_GIT_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_STATUS_LINES = 120;
 const DEFAULT_MAX_DIFF_STAT_CHARS = 8_000;
+const DEFAULT_MAX_BUFFER_BYTES = 512 * 1024;
 const HASH_OBJECT_BATCH_SIZE = 200;
 
 export interface LinkedRepoSnapshotDir {
@@ -45,13 +46,14 @@ export interface CaptureLinkedRepoSnapshotOptions {
   runGit?: RunGit;
   maxStatusLines?: number;
   maxDiffStatChars?: number;
+  maxBuffer?: number;
 }
 
 export async function captureLinkedRepoSnapshot(
   linkedDirs: string[],
   options: CaptureLinkedRepoSnapshotOptions = {},
 ): Promise<LinkedRepoSnapshot> {
-  const runGit = options.runGit ?? defaultRunGit;
+  const runGit = options.runGit ?? createDefaultRunGit(options.maxBuffer ?? DEFAULT_MAX_BUFFER_BYTES);
   const maxStatusLines = options.maxStatusLines ?? DEFAULT_MAX_STATUS_LINES;
   const maxDiffStatChars = options.maxDiffStatChars ?? DEFAULT_MAX_DIFF_STAT_CHARS;
   const uniqueDirs = Array.from(new Set(linkedDirs.filter((dir) => typeof dir === 'string' && dir.trim())));
@@ -68,7 +70,7 @@ export async function captureLinkedRepoChangeSummary(
   before: LinkedRepoSnapshot,
   options: CaptureLinkedRepoSnapshotOptions = {},
 ): Promise<LinkedRepoChangeSummary> {
-  const runGit = options.runGit ?? defaultRunGit;
+  const runGit = options.runGit ?? createDefaultRunGit(options.maxBuffer ?? DEFAULT_MAX_BUFFER_BYTES);
   const maxStatusLines = options.maxStatusLines ?? DEFAULT_MAX_STATUS_LINES;
   const maxDiffStatChars = options.maxDiffStatChars ?? DEFAULT_MAX_DIFF_STAT_CHARS;
   const after = await captureLinkedRepoSnapshot(
@@ -80,7 +82,7 @@ export async function captureLinkedRepoChangeSummary(
       maxDiffStatChars,
     },
   );
-  await captureCleanHeadRangeChanges(before, after, runGit, maxStatusLines, maxDiffStatChars);
+  await captureHeadRangeChanges(before, after, runGit, maxStatusLines, maxDiffStatChars);
   return summarizeLinkedRepoChanges(before, after);
 }
 
@@ -201,7 +203,7 @@ async function captureLinkedRepoDir(
   }
 }
 
-async function captureCleanHeadRangeChanges(
+async function captureHeadRangeChanges(
   before: LinkedRepoSnapshot,
   after: LinkedRepoSnapshot,
   runGit: RunGit,
@@ -212,7 +214,7 @@ async function captureCleanHeadRangeChanges(
   await Promise.all(
     after.linkedDirs.map(async (dir) => {
       const baseline = beforeByPath.get(dir.path);
-      if (!shouldCaptureCleanHeadRange(baseline, dir)) return;
+      if (!shouldCaptureHeadRangeChanges(baseline, dir)) return;
       try {
         // A null baseline head is the unborn-branch shape (fresh `git init`
         // before its first commit), so there is no sha to range from; diff
@@ -225,34 +227,46 @@ async function captureCleanHeadRangeChanges(
           runGit(dir.path, ['diff', '--stat', range, '--']).catch(() => ({ stdout: '', stderr: '' })),
         ]);
         const entries = parseDiffNameStatusZ(nameStatus.stdout);
-        if (entries.length === 0) return;
-        const allStatusLines = entries.map((entry) => entry.displayLine);
+        if (entries.length > 0) {
+          // Merge the committed `before.headSha..after.headSha` paths with
+          // whatever the live worktree status already reports, so a run that
+          // commits some paths and leaves others dirty/untracked surfaces
+          // both instead of only the ref-update count.
+          const livePaths = new Set(statusPathSetsForDir(dir).flat());
+          const newEntries = entries.filter((entry) => !entry.paths.some((path) => livePaths.has(path)));
+          if (newEntries.length > 0) {
+            const newPathSets = newEntries.map((entry) => entry.paths);
+            const newFingerprints = newEntries.map(
+              (entry) => `${entry.paths.join('\0')}\0commit-range:${range}\0status:${entry.statusBits}`,
+            );
+            dir.statusPathSets = [...newPathSets, ...statusPathSetsForDir(dir)];
+            dir.statusFingerprints = [...newFingerprints, ...statusFingerprintsForDir(dir)];
+            dir.statusLineCount = dir.statusPathSets.length;
+            const combinedDisplayLines = [...newEntries.map((entry) => entry.displayLine), ...dir.statusLines];
+            dir.statusLines = combinedDisplayLines.slice(0, maxStatusLines);
+            if (dir.statusPathSets.length > dir.statusLines.length) dir.statusTruncated = true;
+          }
+        }
         const rawDiffStat = diffStat.stdout.trim();
-        const diffStatTruncated = rawDiffStat.length > maxDiffStatChars;
-        dir.statusLines = allStatusLines.slice(0, maxStatusLines);
-        dir.statusPathSets = entries.map((entry) => entry.paths);
-        dir.statusFingerprints = entries.map((entry) =>
-          `${entry.paths.join('\0')}\0commit-range:${range}\0status:${entry.statusBits}`,
-        );
-        dir.statusLineCount = entries.length;
-        if (entries.length > dir.statusLines.length) dir.statusTruncated = true;
-        dir.diffStat = rawDiffStat
-          ? rawDiffStat.slice(0, maxDiffStatChars)
-          : dir.diffStat;
-        if (diffStatTruncated) dir.diffStatTruncated = true;
+        if (rawDiffStat) {
+          const combinedDiffStat = dir.diffStat ? `${rawDiffStat}\n${dir.diffStat}` : rawDiffStat;
+          const diffStatTruncated = combinedDiffStat.length > maxDiffStatChars;
+          dir.diffStat = combinedDiffStat.slice(0, maxDiffStatChars);
+          if (diffStatTruncated) dir.diffStatTruncated = true;
+        }
       } catch {
-        // Keep the ref-update summary when the optional range probe fails.
+        // Keep the live-status/ref-update summary when the optional range probe fails.
       }
     }),
   );
 }
 
-function shouldCaptureCleanHeadRange(
+function shouldCaptureHeadRangeChanges(
   baseline: LinkedRepoSnapshotDir | undefined,
   dir: LinkedRepoSnapshotDir,
 ): baseline is LinkedRepoSnapshotDir {
   if (!baseline) return false;
-  if (dir.status !== 'clean' || dir.statusLineCount !== 0) return false;
+  if (dir.status === 'error' || dir.status === 'not_git') return false;
   if (baseline.status === 'error' || baseline.status === 'not_git') return false;
   // Only the after-head is required: a null baseline head (unborn branch)
   // still has a summarizable `null -> first commit` transition.
@@ -560,30 +574,86 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-function defaultRunGit(dir: string, args: string[]): Promise<RunGitResult> {
-  const gitArgs = ['-c', 'core.quotepath=false', '-C', dir, ...args];
-  return new Promise((resolve, reject) => {
-    execFileCallback(
-      'git',
-      gitArgs,
-      {
-        encoding: 'utf8',
+// Drop a final, possibly-truncated record so callers parsing newline- or
+// NUL-separated git output only see complete entries.
+function truncateToCompleteLines(value: string): string {
+  let cut = -1;
+  for (let i = value.length - 1; i >= 0; i -= 1) {
+    if (value[i] === '\n' || value[i] === '\0') {
+      cut = i;
+      break;
+    }
+  }
+  return cut === -1 ? '' : value.slice(0, cut + 1);
+}
+
+// Trim a string to at most maxBytes UTF-8 bytes without splitting a
+// multi-byte character.
+function takeUtf8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && ((buffer[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return buffer.toString('utf8', 0, end);
+}
+
+function createDefaultRunGit(maxBuffer: number): RunGit {
+  return function runGit(dir: string, args: string[]): Promise<RunGitResult> {
+    const gitArgs = ['-c', 'core.quotepath=false', '-C', dir, ...args];
+    return new Promise((resolve, reject) => {
+      const child = spawn('git', gitArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
         timeout: DEFAULT_GIT_TIMEOUT_MS,
-        maxBuffer: 512 * 1024,
         windowsHide: true,
-      },
-      (err, stdout, stderr) => {
-        const result = {
-          stdout: typeof stdout === 'string' ? stdout : String(stdout ?? ''),
-          stderr: typeof stderr === 'string' ? stderr : String(stderr ?? ''),
+      });
+
+      let stdout = '';
+      let stdoutBytes = 0;
+      let stdoutTruncated = false;
+      let stderr = '';
+      let stderrBytes = 0;
+
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string) => {
+        if (stdoutTruncated) return;
+        const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+        if (stdoutBytes + chunkBytes > maxBuffer) {
+          // Output exceeded maxBuffer: keep what we already buffered (down
+          // to the last complete line) instead of failing the whole probe
+          // and marking the linked dir as unreadable.
+          stdoutTruncated = true;
+          stdout += takeUtf8Bytes(chunk, maxBuffer - stdoutBytes);
+          return;
+        }
+        stdout += chunk;
+        stdoutBytes += chunkBytes;
+      });
+
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (chunk: string) => {
+        if (stderrBytes > maxBuffer) return;
+        stderrBytes += Buffer.byteLength(chunk, 'utf8');
+        stderr += chunk;
+      });
+
+      child.on('error', (err) => reject(err));
+      child.on('close', (code, signal) => {
+        const result: RunGitResult = {
+          stdout: stdoutTruncated ? truncateToCompleteLines(stdout) : stdout,
+          stderr,
         };
-        if (err) {
-          const message = result.stderr.trim() || result.stdout.trim() || err.message;
+        if (signal) {
+          reject(new Error(`git was terminated by signal ${signal}`));
+          return;
+        }
+        if (code !== 0) {
+          const message = result.stderr.trim() || result.stdout.trim() || `git exited with code ${code}`;
           reject(new Error(message));
           return;
         }
         resolve(result);
-      },
-    );
-  });
+      });
+    });
+  };
 }

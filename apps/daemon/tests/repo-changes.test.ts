@@ -1,4 +1,10 @@
-﻿import { describe, expect, it } from 'vitest';
+﻿import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+import { describe, expect, it } from 'vitest';
 
 import {
   captureLinkedRepoChangeSummary,
@@ -7,6 +13,8 @@ import {
   type LinkedRepoSnapshot,
   type RunGit,
 } from '../src/repo-changes.js';
+
+const execFileAsync = promisify(execFile);
 
 describe('linked repo change summaries', () => {
   it('captures git status, diff stat, branch, and head for linked dirs', async () => {
@@ -290,6 +298,55 @@ describe('linked repo change summaries', () => {
       newStatusLineCount: 2,
       statusLines: ['A  initial-output.ts', 'A  src/second.ts'],
       diffStat: 'initial-output.ts | 3 +++\n src/second.ts | 1 +\n 2 files changed, 4 insertions(+)',
+    });
+  });
+
+  it('captures both committed and live-dirty paths after a run that does both', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') {
+        return { stdout: phase === 'before' ? 'abc1234\n' : 'def5678\n', stderr: '' };
+      }
+      if (command === 'status --short --untracked-files=all') {
+        return { stdout: phase === 'before' ? '' : '?? notes.md\n', stderr: '' };
+      }
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (command === 'hash-object -- notes.md') return { stdout: 'notes-hash\n', stderr: '' };
+      if (command === 'diff --name-status -z abc1234..def5678 --') {
+        return { stdout: 'A\0committed-output.ts\0', stderr: '' };
+      }
+      if (command === 'diff --stat abc1234..def5678 --') {
+        return {
+          stdout: ' committed-output.ts | 1 +\n 1 file changed, 1 insertion(+)\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const summary = await captureLinkedRepoChangeSummary(before, { runGit });
+
+    expect(summary).toMatchObject({
+      changedFileCount: 2,
+      newStatusLineCount: 2,
+      preexistingChangeCount: 0,
+      refChangeCount: 1,
+      hasChanges: true,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      status: 'changed',
+      headSha: 'def5678',
+      headChanged: true,
+      changedFileCount: 2,
+      newStatusLineCount: 2,
+      untrackedFileCount: 1,
+      statusLines: ['A  committed-output.ts', '?? notes.md'],
+      diffStat: 'committed-output.ts | 1 +\n 1 file changed, 1 insertion(+)',
     });
   });
 
@@ -789,5 +846,29 @@ describe('linked repo change summaries', () => {
       newStatusLineCount: 1,
       preexistingChangeCount: 0,
     });
+  });
+
+  it('does not classify a repo as unreadable when status output exceeds maxBuffer', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'repo-changes-maxbuffer-'));
+    try {
+      await execFileAsync('git', ['init', '-q'], { cwd: dir });
+      await execFileAsync(
+        'git',
+        ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '--allow-empty', '-m', 'init'],
+        { cwd: dir },
+      );
+      for (let index = 0; index < 30; index += 1) {
+        await writeFile(join(dir, `untracked-file-with-a-fairly-long-name-${index}.txt`), 'content');
+      }
+
+      const snapshot = await captureLinkedRepoSnapshot([dir], { maxBuffer: 200 });
+
+      expect(snapshot.linkedDirs[0]?.error).toBeNull();
+      expect(snapshot.linkedDirs[0]?.status).not.toBe('error');
+      expect(snapshot.linkedDirs[0]?.status).not.toBe('not_git');
+      expect(snapshot.linkedDirs[0]?.statusLineCount).toBeGreaterThan(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
