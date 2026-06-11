@@ -1260,14 +1260,27 @@ export function ProjectView({
   }, [messages]);
   const openQuestionsTab = useCallback((request?: QuestionFormOpenRequest) => {
     if (request) {
-      setManualQuestionFormRequest({
-        ...request,
-        submittedAnswers:
-          request.submittedAnswers ?? submittedAnswersForQuestionFormRequest(request) ?? undefined,
-      });
+      const opensCurrentLiveForm =
+        request.messageId === lastAssistantMessageId
+        && questionForm?.id === request.form.id
+        && questionFormSubmittedAnswers === undefined;
+      if (opensCurrentLiveForm) {
+        setManualQuestionFormRequest(null);
+      } else {
+        setManualQuestionFormRequest({
+          ...request,
+          submittedAnswers:
+            request.submittedAnswers ?? submittedAnswersForQuestionFormRequest(request) ?? undefined,
+        });
+      }
     }
     setQuestionsFocusNonce((n) => n + 1);
-  }, [submittedAnswersForQuestionFormRequest]);
+  }, [
+    lastAssistantMessageId,
+    questionForm,
+    questionFormSubmittedAnswers,
+    submittedAnswersForQuestionFormRequest,
+  ]);
 
   const currentConversationQueuedItems = activeConversationId
     ? queuedChatSends
@@ -4823,10 +4836,6 @@ export function ProjectView({
             onSend: handleSend,
             onRetry: handleRetry,
             onStop: handleStop,
-            onSubmitForm: (text: string) => {
-              if (currentConversationActionDisabled) return;
-              void handleSend(text, [], []);
-            },
             onRemoveQueuedSend: removeQueuedChatSend,
             onUpdateQueuedSend: updateQueuedChatSend,
             onReorderQueuedSends: reorderCurrentConversationQueuedChatSends,
@@ -5615,10 +5624,6 @@ export function ProjectView({
               shareToOpenDesignBusyMessageId={shareToOpenDesignBusyMessageId}
               forceStreamingMessageIds={forceStreamingPluginMessageIds}
               initialDraft={chatInitialDraft}
-              onSubmitForm={(text) => {
-                if (currentConversationActionDisabled) return;
-                void handleSend(text, [], []);
-              }}
               onOpenQuestions={openQuestionsTab}
               onContinueRemainingTasks={handleContinueRemainingTasks}
               onAssistantFeedback={handleAssistantFeedback}
