@@ -245,6 +245,86 @@ describe('linked repo change summaries', () => {
     });
   });
 
+  it('captures committed paths when the baseline repo had an unborn branch', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') {
+        if (phase === 'before') throw new Error('fatal: ambiguous argument \'HEAD\': unknown revision');
+        return { stdout: 'def5678\n', stderr: '' };
+      }
+      if (command === 'status --short --untracked-files=all') return { stdout: '', stderr: '' };
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (command === 'rev-parse --show-object-format') return { stdout: 'sha1\n', stderr: '' };
+      if (command === 'diff --name-status -z 4b825dc642cb6eb9a060e54bf8d69288fbee4904..def5678 --') {
+        return { stdout: 'A\0initial-output.ts\0A\0src/second.ts\0', stderr: '' };
+      }
+      if (command === 'diff --stat 4b825dc642cb6eb9a060e54bf8d69288fbee4904..def5678 --') {
+        return {
+          stdout: ' initial-output.ts | 3 +++\n src/second.ts | 1 +\n 2 files changed, 4 insertions(+)\n',
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    expect(before.linkedDirs[0]?.headSha).toBeNull();
+    phase = 'after';
+    const summary = await captureLinkedRepoChangeSummary(before, { runGit });
+
+    expect(summary).toMatchObject({
+      changedFileCount: 2,
+      newStatusLineCount: 2,
+      preexistingChangeCount: 0,
+      refChangeCount: 1,
+      hasChanges: true,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      status: 'clean',
+      headSha: 'def5678',
+      headChanged: true,
+      changedFileCount: 2,
+      newStatusLineCount: 2,
+      statusLines: ['A  initial-output.ts', 'A  src/second.ts'],
+      diffStat: 'initial-output.ts | 3 +++\n src/second.ts | 1 +\n 2 files changed, 4 insertions(+)',
+    });
+  });
+
+  it('falls back to the ref-update summary when the unborn-baseline range probe fails', async () => {
+    let phase: 'before' | 'after' = 'before';
+    const runGit: RunGit = async (_dir, args) => {
+      const command = args.join(' ');
+      if (command === 'rev-parse --show-toplevel') return { stdout: '/repo\n', stderr: '' };
+      if (command === 'branch --show-current') return { stdout: 'main\n', stderr: '' };
+      if (command === 'rev-parse --short HEAD') {
+        if (phase === 'before') throw new Error('fatal: ambiguous argument \'HEAD\': unknown revision');
+        return { stdout: 'def5678\n', stderr: '' };
+      }
+      if (command === 'status --short --untracked-files=all') return { stdout: '', stderr: '' };
+      if (command === 'diff --stat --') return { stdout: '', stderr: '' };
+      if (command === 'rev-parse --show-object-format') return { stdout: 'sha1\n', stderr: '' };
+      throw new Error(`unexpected git command: ${command}`);
+    };
+
+    const before = await captureLinkedRepoSnapshot(['/repo'], { runGit });
+    phase = 'after';
+    const summary = await captureLinkedRepoChangeSummary(before, { runGit });
+
+    expect(summary).toMatchObject({
+      changedFileCount: 0,
+      refChangeCount: 1,
+      hasChanges: true,
+    });
+    expect(summary.linkedDirs[0]).toMatchObject({
+      status: 'clean',
+      headSha: 'def5678',
+      headChanged: true,
+    });
+  });
+
   it('treats further edits to an already-dirty path as new output', async () => {
     let phase: 'before' | 'after' = 'before';
     const runGit: RunGit = async (_dir, args) => {

@@ -213,8 +213,13 @@ async function captureCleanHeadRangeChanges(
     after.linkedDirs.map(async (dir) => {
       const baseline = beforeByPath.get(dir.path);
       if (!shouldCaptureCleanHeadRange(baseline, dir)) return;
-      const range = `${baseline.headSha}..${dir.headSha}`;
       try {
+        // A null baseline head is the unborn-branch shape (fresh `git init`
+        // before its first commit), so there is no sha to range from; diff
+        // against git's well-known empty-tree object instead, which yields
+        // every path the run committed.
+        const baseRef = baseline.headSha ?? (await emptyTreeRef(dir.path, runGit));
+        const range = `${baseRef}..${dir.headSha}`;
         const [nameStatus, diffStat] = await Promise.all([
           runGit(dir.path, ['diff', '--name-status', '-z', range, '--']),
           runGit(dir.path, ['diff', '--stat', range, '--']).catch(() => ({ stdout: '', stderr: '' })),
@@ -249,8 +254,26 @@ function shouldCaptureCleanHeadRange(
   if (!baseline) return false;
   if (dir.status !== 'clean' || dir.statusLineCount !== 0) return false;
   if (baseline.status === 'error' || baseline.status === 'not_git') return false;
-  if (!baseline.headSha || !dir.headSha) return false;
+  // Only the after-head is required: a null baseline head (unborn branch)
+  // still has a summarizable `null -> first commit` transition.
+  if (!dir.headSha) return false;
   return baseline.headSha !== dir.headSha;
+}
+
+// Hashes of git's empty tree object, fixed by the object format. Diffing
+// `<empty tree>..<head>` enumerates every committed path, which is the only
+// way to summarize a first commit on a previously unborn branch.
+const EMPTY_TREE_SHA1 = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+const EMPTY_TREE_SHA256 = '6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321';
+
+async function emptyTreeRef(dir: string, runGit: RunGit): Promise<string> {
+  try {
+    const format = await runGit(dir, ['rev-parse', '--show-object-format']);
+    if (format.stdout.trim() === 'sha256') return EMPTY_TREE_SHA256;
+  } catch {
+    // Pre-2.31 git has no --show-object-format and only supports SHA-1.
+  }
+  return EMPTY_TREE_SHA1;
 }
 
 interface DiffNameStatusEntry {
