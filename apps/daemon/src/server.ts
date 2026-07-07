@@ -684,9 +684,10 @@ import {
 import {
   computeIncludeStable,
   hashStableInstructions,
-  isAgentResumeFailure,
   persistCapturedAgentSession,
   resolveAgentResumeContext,
+  resolveAgentResumeFailurePolicy,
+  resolveAgentResumePromptPolicy,
 } from './agent-session-resume.js';
 import {
   initialNativeSessionRecoveryMetadata,
@@ -10482,6 +10483,7 @@ export async function startServer({
       invalidationReason: agentResumeCtx.invalidationReason,
     });
     publishNativeSessionRecoveryMetadata();
+    const agentResumePromptPolicy = resolveAgentResumePromptPolicy(agentResumeCtx);
     const userRequestPrompt = composeChatUserRequestForAgent(
       message,
       currentPrompt,
@@ -10489,7 +10491,7 @@ export async function startServer({
       // existing session. A create turn still sends the full transcript so
       // a brand-new session (incl. first turn after another agent)
       // is seeded with prior context.
-      { skipTranscript: agentResumeCtx.isResuming },
+      { skipTranscript: agentResumePromptPolicy.skipTranscript },
     );
     // The stable instruction slice (daemon prompt + tool contract + system
     // prompt = design system / skills / memory) is identical across turns of
@@ -10515,12 +10517,12 @@ export async function startServer({
     // tool-token grant's presence flips between turns (rare cwd/projectId edge
     // cases); any such change correctly forces a full re-send that turn.
     const includeStableInstructions = computeIncludeStable(
-      agentResumeCtx.isResuming,
+      agentResumePromptPolicy.skipTranscript,
       agentResumeCtx.storedStablePromptHash,
       currentStableHash,
     );
     run.promptCache = describeStablePromptCache({
-      isResuming: agentResumeCtx.isResuming,
+      isResuming: agentResumePromptPolicy.skipTranscript,
       storedStablePromptHash: agentResumeCtx.storedStablePromptHash,
       currentStableHash,
       storedStableSections: agentResumeCtx.storedStableSections,
@@ -11671,7 +11673,7 @@ export async function startServer({
           hasPriorAssistantTurn,
           agentLogFilePath,
           promptFilePath: promptFile?.path,
-          resumeSessionId: agentResumeCtx.resumeSessionId,
+          resumeSessionId: agentResumePromptPolicy.resumeSessionId,
           newSessionId: agentResumeCtx.newSessionId,
           disablePlugins:
             def.id === 'codex'
@@ -13026,15 +13028,20 @@ export async function startServer({
           // authority on how a resume failure ends.
           if (
             (runtimeResumesSessionById(def) || def.resumesSessionViaAcpLoad === true) &&
-            agentResumeCtx.isResuming &&
             !run.resumeAutoReseeded &&
-            isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+            resolveAgentResumeFailurePolicy({
+              agentId: def.id,
+              stderr: agentStderrTail,
+              stdout: agentStdoutTail,
+              isResuming: agentResumePromptPolicy.skipTranscript,
+              resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+            }).resumeFailed
           ) {
             design.runs.emit(run, 'diagnostic', {
               type: 'agent_resume_failed_suppressed',
               agent_id: def.id,
               reason: 'resume_failed',
-              previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+              previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             });
             return;
           }
@@ -13176,8 +13183,8 @@ export async function startServer({
         prompt: composed,
         cwd: effectiveCwd,
         model: safeModel,
-        parentSession: agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId
-          ? agentResumeCtx.resumeSessionId
+        parentSession: agentResumePromptPolicy.resumeSessionId
+          ? agentResumePromptPolicy.resumeSessionId
           : undefined,
         send: (channel, payload) => {
           if (channel === 'agent') {
@@ -13226,8 +13233,8 @@ export async function startServer({
         ...(def.id === 'amr' ? { modelUnavailableErrorCode: 'AMR_MODEL_UNAVAILABLE' } : {}),
         // Resume the prior upstream session (drives `session/load`) when the
         // resume-identity guard says it is safe; otherwise a fresh session/new.
-        ...(def.resumesSessionViaAcpLoad === true && agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId
-          ? { resumeSessionId: agentResumeCtx.resumeSessionId }
+        ...(def.resumesSessionViaAcpLoad === true && agentResumePromptPolicy.resumeSessionId
+          ? { resumeSessionId: agentResumePromptPolicy.resumeSessionId }
           : {}),
         onCliReady: () => noteCliReadyAt(),
         onSessionInit: () => noteSessionInitDoneAt(),
@@ -13285,16 +13292,20 @@ export async function startServer({
           if (
             event === 'error' &&
             def.resumesSessionViaAcpLoad === true &&
-            agentResumeCtx.isResuming &&
-            agentResumeCtx.resumeSessionId &&
             !run.resumeAutoReseeded &&
-            isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+            resolveAgentResumeFailurePolicy({
+              agentId: def.id,
+              stderr: agentStderrTail,
+              stdout: agentStdoutTail,
+              isResuming: agentResumePromptPolicy.skipTranscript,
+              resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+            }).resumeFailed
           ) {
             design.runs.emit(run, 'diagnostic', {
               type: 'agent_resume_failed_suppressed',
               agent_id: def.id,
               reason: 'resume_failed',
-              previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+              previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             });
             return;
           }
@@ -13500,9 +13511,14 @@ export async function startServer({
       if (
         !run.cancelRequested &&
         (runtimeResumesSessionById(def) || def.resumesSessionViaAcpLoad === true) &&
-        agentResumeCtx.isResuming &&
         run.conversationId &&
-        isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+        resolveAgentResumeFailurePolicy({
+          agentId: def.id,
+          stderr: agentStderrTail,
+          stdout: agentStdoutTail,
+          isResuming: agentResumePromptPolicy.skipTranscript,
+          resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+        }).autoReseedFullTranscript
       ) {
         // The resumed upstream session is gone (expired / pruned). Clear the dead
         // handle and TRANSPARENTLY re-run this same turn with a fresh session +
@@ -13515,11 +13531,11 @@ export async function startServer({
         clearAgentSession(db, run.conversationId, def.id);
         if (!run.resumeAutoReseeded) {
           run.resumeAutoReseeded = true;
-          run.resumeAutoReseededFrom = agentResumeCtx.resumeSessionId ?? null;
+          run.resumeAutoReseededFrom = agentResumePromptPolicy.resumeSessionId ?? null;
           run.nativeSessionRecovery = markNativeSessionAutoReseeded({
             previous: run.nativeSessionRecovery,
             agentId: def.id,
-            previousSessionId: agentResumeCtx.resumeSessionId,
+            previousSessionId: agentResumePromptPolicy.resumeSessionId,
           });
           publishNativeSessionRecoveryMetadata();
           // Persisted to the per-run events.jsonl that the help → diagnostics
@@ -13529,7 +13545,7 @@ export async function startServer({
             type: 'agent_resume_auto_reseed',
             agent_id: def.id,
             reason: 'resume_failed',
-            previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+            previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             stale_session_cleared: true,
             nativeSessionRecovery: run.nativeSessionRecovery,
           });
