@@ -5025,6 +5025,13 @@ export async function startServer({
           cwd: effectiveCwd,
           lastMessageId: run.assistantMessageId ?? null,
         });
+        run.nativeSessionRecovery = markNativeSessionCaptured({
+          previous: run.nativeSessionRecovery,
+          agentId: def.id,
+          sessionId: liveSessionId,
+          resumed: agentResumeCtx.isResuming,
+        });
+        publishNativeSessionRecoveryMetadata();
       }
       finalizeRetryTelemetry(status, decision, failure, errorCode);
       const rpcCloseReason = deriveRpcCloseReason(status, code, signal);
