@@ -542,6 +542,11 @@ import {
   resolveAgentResumeContext,
 } from './agent-session-resume.js';
 import {
+  initialNativeSessionRecoveryMetadata,
+  markNativeSessionAutoReseeded,
+  markNativeSessionCaptured,
+} from './native-session-recovery.js';
+import {
   createLiveArtifact,
   deleteLiveArtifact,
   ensureLiveArtifactPreview,
@@ -4540,6 +4545,21 @@ export async function startServer({
             currentAssistantMessageId: run.assistantMessageId ?? null,
           })
         : { resumeSessionId: null as string | null, newSessionId: undefined as string | undefined, isResuming: false, storedStablePromptHash: null as string | null, invalidationReason: null };
+    const publishNativeSessionRecoveryMetadata = () => {
+      if (!run.nativeSessionRecovery) return;
+      design.runs.emit(run, 'diagnostic', {
+        type: 'native_session_recovery',
+        nativeSessionRecovery: run.nativeSessionRecovery,
+      });
+    };
+    run.nativeSessionRecovery = initialNativeSessionRecoveryMetadata({
+      agent: def,
+      supportsSessionResume: agentSupportsSessionResume,
+      isResuming: agentResumeCtx.isResuming,
+      resumeSessionId: agentResumeCtx.resumeSessionId,
+      invalidationReason: agentResumeCtx.invalidationReason,
+    });
+    publishNativeSessionRecoveryMetadata();
     const userRequestPrompt = composeChatUserRequestForAgent(
       message,
       currentPrompt,
@@ -5511,6 +5531,15 @@ export async function startServer({
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
           });
+          if (!agentCapturesSessionId) {
+            run.nativeSessionRecovery = markNativeSessionCaptured({
+              previous: run.nativeSessionRecovery,
+              agentId: def.id,
+              sessionId: createTurnSessionId,
+              resumed: false,
+            });
+            publishNativeSessionRecoveryMetadata();
+          }
           return;
         }
         if (agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId) {
@@ -5528,6 +5557,15 @@ export async function startServer({
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
           });
+          if (!agentCapturesSessionId) {
+            run.nativeSessionRecovery = markNativeSessionCaptured({
+              previous: run.nativeSessionRecovery,
+              agentId: def.id,
+              sessionId: agentResumeCtx.resumeSessionId,
+              resumed: true,
+            });
+            publishNativeSessionRecoveryMetadata();
+          }
         }
       };
     }
@@ -6514,6 +6552,13 @@ export async function startServer({
         ev.sessionId.length > 0
       ) {
         capturedSessionId = ev.sessionId;
+        run.nativeSessionRecovery = markNativeSessionCaptured({
+          previous: run.nativeSessionRecovery,
+          agentId: def.id,
+          sessionId: capturedSessionId,
+          resumed: agentResumeCtx.isResuming,
+        });
+        publishNativeSessionRecoveryMetadata();
       }
       lastAgentEventPhase = summarizeAgentEventForInactivity(ev);
       noteAgentActivity();
@@ -6902,6 +6947,12 @@ export async function startServer({
         if (!run.resumeAutoReseeded) {
           run.resumeAutoReseeded = true;
           run.resumeAutoReseededFrom = agentResumeCtx.resumeSessionId ?? null;
+          run.nativeSessionRecovery = markNativeSessionAutoReseeded({
+            previous: run.nativeSessionRecovery,
+            agentId: def.id,
+            previousSessionId: agentResumeCtx.resumeSessionId,
+          });
+          publishNativeSessionRecoveryMetadata();
           // Persisted to the per-run events.jsonl that the help → diagnostics
           // export bundles, so the whole resume → fail → auto-reseed chain is
           // visible in a support bundle without any user-facing signal.
@@ -6911,6 +6962,7 @@ export async function startServer({
             reason: 'resume_failed',
             previous_session_id: agentResumeCtx.resumeSessionId ?? null,
             stale_session_cleared: true,
+            nativeSessionRecovery: run.nativeSessionRecovery,
           });
           scheduleRetryRestart(0);
           return;
@@ -7249,6 +7301,13 @@ export async function startServer({
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
           });
+          run.nativeSessionRecovery = markNativeSessionCaptured({
+            previous: run.nativeSessionRecovery,
+            agentId: def.id,
+            sessionId: sessionPath,
+            resumed: agentResumeCtx.isResuming,
+          });
+          publishNativeSessionRecoveryMetadata();
         }
       }
       // ACP session/load adapters (AMR/vela) report a durable upstream handle
@@ -7271,6 +7330,13 @@ export async function startServer({
           cwd: effectiveCwd,
           lastMessageId: run.assistantMessageId ?? null,
         });
+        run.nativeSessionRecovery = markNativeSessionCaptured({
+          previous: run.nativeSessionRecovery,
+          agentId: def.id,
+          sessionId: acpSession.getDurableSessionId(),
+          resumed: agentResumeCtx.isResuming,
+        });
+        publishNativeSessionRecoveryMetadata();
       }
       if (status === 'succeeded') {
         try {
