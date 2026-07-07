@@ -23,6 +23,8 @@ export type ResumeInvalidationReason =
   | 'missing_cursor';
 
 export interface AgentResumeContext {
+  /** Stored CLI session id if one exists, even when a guard rejects resuming it. */
+  storedSessionId: string | null;
   /** Stored CLI session id to resume, or null when starting fresh. */
   resumeSessionId: string | null;
   /** Freshly minted UUID to open a new session with when not resuming. */
@@ -113,6 +115,7 @@ export function resolveAgentResumeContext(
       : null;
   const resumable = storedSessionId != null && invalidationReason == null;
   return {
+    storedSessionId,
     resumeSessionId: resumable ? storedSessionId : null,
     newSessionId: randomUUID(),
     isResuming: resumable,

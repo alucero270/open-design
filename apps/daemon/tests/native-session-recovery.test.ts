@@ -83,12 +83,45 @@ describe('native session recovery metadata', () => {
     expect(JSON.stringify(acp)).not.toContain('vela-durable-session');
   });
 
+  it('classifies stream-captured CLI handles from runtime capabilities', () => {
+    const rawSessionId = 'ses_opencode_capture_123';
+    const initial = initialNativeSessionRecoveryMetadata({
+      agent: { id: 'opencode', resumesSessionViaCli: true, capturesSessionIdFromStream: true },
+      supportsSessionResume: true,
+      isResuming: false,
+      resumeSessionId: null,
+      invalidationReason: null,
+      updatedAt: 350,
+    });
+    const captured = markNativeSessionCaptured({
+      previous: initial,
+      agentId: 'opencode',
+      sessionId: rawSessionId,
+      resumed: false,
+      updatedAt: 360,
+    });
+
+    expect(initial).toMatchObject({
+      acquisition: 'stream-captured',
+      continuation: 'native-resume-by-id',
+      handle: { present: false, kind: 'cli-thread-id' },
+    });
+    expect(captured).toMatchObject({
+      agentId: 'opencode',
+      state: 'captured_not_resumed',
+      handle: { present: true, kind: 'cli-thread-id', display: null, redacted: true },
+    });
+    expect(captured.handle.sha256).toBe(createHash('sha256').update(rawSessionId, 'utf8').digest('hex'));
+    expect(JSON.stringify(captured)).not.toContain(rawSessionId);
+  });
+
   it('distinguishes skipped, captured, resumed, and auto-reseeded states', () => {
     const skipped = initialNativeSessionRecoveryMetadata({
       agent: { id: 'codex', resumesSessionViaCli: true, capturesSessionIdFromStream: true },
       supportsSessionResume: true,
       isResuming: false,
-      resumeSessionId: 'stored-thread-id',
+      resumeSessionId: null,
+      storedSessionId: 'stored-thread-id',
       invalidationReason: 'model_changed',
       updatedAt: 400,
     });
@@ -116,6 +149,7 @@ describe('native session recovery metadata', () => {
     expect(skipped).toMatchObject({
       state: 'resume_skipped',
       guardReason: 'model_changed',
+      handle: { present: true, kind: 'cli-thread-id', display: null, redacted: true },
     });
     expect(captured).toMatchObject({
       state: 'captured_not_resumed',
@@ -128,5 +162,6 @@ describe('native session recovery metadata', () => {
       fallbackReason: 'resume_failed',
     });
     expect(JSON.stringify(reseeded)).not.toContain('new-thread-id');
+    expect(JSON.stringify(skipped)).not.toContain('stored-thread-id');
   });
 });

@@ -4544,7 +4544,7 @@ export async function startServer({
             currentCwd: effectiveCwd,
             currentAssistantMessageId: run.assistantMessageId ?? null,
           })
-        : { resumeSessionId: null as string | null, newSessionId: undefined as string | undefined, isResuming: false, storedStablePromptHash: null as string | null, invalidationReason: null };
+        : { storedSessionId: null as string | null, resumeSessionId: null as string | null, newSessionId: undefined as string | undefined, isResuming: false, storedStablePromptHash: null as string | null, invalidationReason: null };
     const publishNativeSessionRecoveryMetadata = () => {
       if (!run.nativeSessionRecovery) return;
       design.runs.emit(run, 'diagnostic', {
@@ -4557,6 +4557,7 @@ export async function startServer({
       supportsSessionResume: agentSupportsSessionResume,
       isResuming: agentResumeCtx.isResuming,
       resumeSessionId: agentResumeCtx.resumeSessionId,
+      storedSessionId: agentResumeCtx.storedSessionId,
       invalidationReason: agentResumeCtx.invalidationReason,
     });
     publishNativeSessionRecoveryMetadata();

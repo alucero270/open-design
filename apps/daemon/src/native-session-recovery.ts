@@ -23,16 +23,26 @@ function handleKindForAgent(agentId: string | null): NativeSessionHandleKind {
   return 'unknown';
 }
 
+function handleKindForRuntime(
+  def: Pick<RuntimeAgentDef, 'id' | 'capturesSessionIdFromStream' | 'resumesSessionViaAcpLoad'>,
+): NativeSessionHandleKind {
+  if (def.resumesSessionViaAcpLoad === true) return 'acp-session-handle';
+  if (def.id === 'pi') return 'session-file-path';
+  if (def.capturesSessionIdFromStream === true) return 'cli-thread-id';
+  return handleKindForAgent(def.id);
+}
+
 export function redactNativeSessionHandle(input: {
   agentId: string | null;
   sessionId: string | null | undefined;
+  kind?: NativeSessionHandleKind;
 }): NativeSessionRecoveryHandle {
   const value = typeof input.sessionId === 'string' && input.sessionId.length > 0
     ? input.sessionId
     : null;
   return {
     present: value !== null,
-    kind: handleKindForAgent(input.agentId),
+    kind: input.kind ?? handleKindForAgent(input.agentId),
     display: null,
     sha256: value ? sha256(value) : null,
     redacted: value !== null,
@@ -71,25 +81,31 @@ export function initialNativeSessionRecoveryMetadata(input: {
   supportsSessionResume: boolean;
   isResuming: boolean;
   resumeSessionId: string | null | undefined;
+  storedSessionId?: string | null | undefined;
   invalidationReason: ResumeInvalidationReason | null | undefined;
   updatedAt?: number;
 }): NativeSessionRecoveryMetadata {
   const now = input.updatedAt ?? Date.now();
+  const handleKind = handleKindForRuntime(input.agent);
   if (!input.supportsSessionResume) {
     return {
       agentId: input.agent.id,
       state: 'not_applicable',
       acquisition: 'none',
       continuation: 'none',
-      handle: redactNativeSessionHandle({ agentId: input.agent.id, sessionId: null }),
+      handle: redactNativeSessionHandle({ agentId: input.agent.id, sessionId: null, kind: handleKind }),
       guardReason: 'unsupported',
       fallbackReason: null,
       updatedAt: now,
     };
   }
+  const diagnosticSessionId = input.invalidationReason
+    ? (input.storedSessionId ?? input.resumeSessionId ?? null)
+    : (input.resumeSessionId ?? null);
   const handle = redactNativeSessionHandle({
     agentId: input.agent.id,
-    sessionId: input.resumeSessionId ?? null,
+    sessionId: diagnosticSessionId,
+    kind: handleKind,
   });
   const state: NativeSessionRecoveryMetadata['state'] =
     input.isResuming && handle.present
@@ -124,7 +140,11 @@ export function markNativeSessionCaptured(input: {
     invalidationReason: null,
     ...(input.updatedAt !== undefined ? { updatedAt: input.updatedAt } : {}),
   });
-  const handle = redactNativeSessionHandle({ agentId: input.agentId, sessionId: input.sessionId });
+  const handle = redactNativeSessionHandle({
+    agentId: input.agentId,
+    sessionId: input.sessionId,
+    kind: previous.handle.kind,
+  });
   return {
     ...previous,
     state: handle.present
@@ -157,6 +177,7 @@ export function markNativeSessionAutoReseeded(input: {
     handle: redactNativeSessionHandle({
       agentId: input.agentId,
       sessionId: input.previousSessionId,
+      kind: previous.handle.kind,
     }),
     fallbackReason: 'resume_failed',
     updatedAt: input.updatedAt ?? Date.now(),
