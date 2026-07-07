@@ -4,6 +4,8 @@ export const AGENT_SESSION_HANDLE_KINDS = [
   'acp-session-handle',
   'session-file-path',
   'continue-latest',
+  'none',
+  'unknown',
 ] as const;
 
 export type AgentSessionHandleKind = (typeof AGENT_SESSION_HANDLE_KINDS)[number];
@@ -14,6 +16,8 @@ export const AGENT_SESSION_HANDLE_ACQUISITION_MODES = [
   'acp-session-load',
   'session-file-discovered',
   'continue-latest',
+  'none',
+  'unknown',
 ] as const;
 
 export type AgentSessionHandleAcquisitionMode =

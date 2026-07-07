@@ -66,12 +66,16 @@ Core enums:
   - `acp-session-handle`
   - `session-file-path`
   - `continue-latest`
+  - `none`
+  - `unknown`
 - `AgentSessionHandleAcquisitionMode`
   - `daemon-specified`
   - `stream-captured`
   - `acp-session-load`
   - `session-file-discovered`
   - `continue-latest`
+  - `none`
+  - `unknown`
 - `AgentSessionContinuationMode`
   - `native-resume-by-id`
   - `native-continue-latest`
@@ -183,10 +187,10 @@ shape before the adapter work starts.
 | Kiro | candidate | `acp-session-handle` | `acp-session-load` | `acp-session-load` | ACP-native candidate. |
 | Vibe | candidate | `acp-session-handle` | `acp-session-load` | `acp-session-load` | ACP-native candidate. |
 | Devin | candidate | `acp-session-handle` | `acp-session-load` | `acp-session-load` | ACP-native candidate from the #730 direction. |
-| Gemini / Antigravity | unknown | TBD | TBD | `none` | Current `agy -c` path is deliberately not used by OD because it weakens prompt control. |
-| Qoder | unknown | TBD | TBD | `none` | No shared resume contract wired yet. |
-| Copilot | unknown | TBD | TBD | `none` | No shared resume contract wired yet. |
-| Qwen | unknown | TBD | TBD | `none` | No shared resume contract wired yet. |
+| Gemini / Antigravity | unknown | `unknown` | `unknown` | `none` | Current `agy -c` path is deliberately not used by OD because it weakens prompt control. |
+| Qoder | unknown | `unknown` | `unknown` | `none` | No shared resume contract wired yet. |
+| Copilot | unknown | `unknown` | `unknown` | `none` | No shared resume contract wired yet. |
+| Qwen | unknown | `unknown` | `unknown` | `none` | No shared resume contract wired yet. |
 
 Minimum capability expectations for implementation rows:
 
